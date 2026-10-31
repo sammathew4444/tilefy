@@ -391,6 +391,24 @@ let instantMoves = movesDuring("layout-dwindle")
 print("  note  a layout change took \(animatedMoves) window moves when animated, \(instantMoves) when instant")
 check("animated moves go through in-between positions", animatedMoves > instantMoves * 2, "\(animatedMoves) moves, against \(instantMoves) when instant")
 check("and end up exactly tiled", isTiled(count: 3), describe())
+
+// A second command mid-slide must not strand a window partway. A float's position is only sent once,
+// so it's the one at risk.
+writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle", "animationDuration": 0.6}"#)
+if let window = status()?.focusedWindow {
+    dispatchWithoutWaiting("toggle-float")
+    pump(0.25)
+    dispatchWithoutWaiting("retile")
+    pump(0.15)
+    dispatchWithoutWaiting("retile")
+    check("a window interrupted mid-slide still arrives", waitUntil {
+        guard let frame = frames()[Int(window)] else { return false }
+        return abs(frame.midX - screenArea().midX) < areaTolerance && abs(frame.midY - screenArea().midY) < areaTolerance
+    }, describe())
+    dispatch("toggle-float")
+    _ = waitUntil { isTiled(count: 3) }
+}
+
 writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle"}"#)
 _ = waitUntil { isTiled(count: 3) }
 

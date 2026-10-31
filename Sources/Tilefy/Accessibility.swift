@@ -114,6 +114,13 @@ final class FrameWriter {
         var isDraining = false
     }
 
+    private struct Slide {
+        let id: WindowID
+        let element: AXUIElement
+        let from: CGRect
+        let to: CGRect
+    }
+
     private let lock = NSLock()
     private var pending: [pid_t: Pending] = [:]
     private var queues: [pid_t: DispatchQueue] = [:]
@@ -194,13 +201,13 @@ final class FrameWriter {
         let wasEnhanced = AX.attribute(app, enhanced as String, as: Bool.self) ?? false
         if wasEnhanced { AXUIElementSetAttributeValue(app, enhanced, kCFBooleanFalse) }
 
-        var slides: [(element: AXUIElement, from: CGRect, to: CGRect)] = []
+        var slides: [Slide] = []
         let canSlide = work.animationDuration > 0 && !isTooSlowToAnimate(pid)
-        for (element, frame) in work.frames.values {
+        for (id, (element, frame)) in work.frames {
             let current = AX.frame(of: element)
             if let current, Self.isClose(current, frame) { continue }
             if canSlide, let current, FrameAnimation.isWorthAnimating(from: current, to: frame, monitors: work.monitors) {
-                slides.append((element, current, frame))
+                slides.append(Slide(id: id, element: element, from: current, to: frame))
             } else {
                 AX.setFrame(element, frame)
             }
@@ -234,7 +241,7 @@ final class FrameWriter {
 
     /// Moving a window through Accessibility is slow in some apps, as each step makes the app lay out
     /// again. If this app can't keep up, it jumps straight to the end, and goes on doing so for a while.
-    private func slide(_ slides: [(element: AXUIElement, from: CGRect, to: CGRect)], duration: Double, pid: pid_t) {
+    private func slide(_ slides: [Slide], duration: Double, pid: pid_t) {
         guard !slides.isEmpty else { return }
         let frameBudget: TimeInterval = 0.035
         let frameTarget: TimeInterval = 1.0 / 60
@@ -251,7 +258,10 @@ final class FrameWriter {
                 AX.setFrameForAnimation(slide.element, FrameAnimation.interpolate(from: slide.from, to: slide.to, progress: progress))
             }
             // Newer positions are waiting. Stop here, and the next pass carries on from wherever this is.
-            if hasPendingWork(pid) { return }
+            if hasPendingWork(pid) {
+                carryForward(slides, pid: pid)
+                return
+            }
 
             let spent = Date().timeIntervalSince(frameStart)
             slowFrames = spent > frameBudget ? slowFrames + 1 : 0
@@ -264,6 +274,18 @@ final class FrameWriter {
         }
         for slide in slides { AX.setFrame(slide.element, slide.to) }
         log.info("Animated \(slides.count) windows for pid \(pid): \(frames) frames in \(Int(Date().timeIntervalSince(start) * 1000)) ms.")
+    }
+
+    /// Hands interrupted slides to the next pass, unless it has its own idea for that window. Newer
+    /// plans don't always mention a window again: a float's position, for one, is only sent once.
+    private func carryForward(_ slides: [Slide], pid: pid_t) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var entry = pending[pid] else { return }
+        for slide in slides where entry.frames[slide.id] == nil && entry.hides[slide.id] == nil {
+            entry.frames[slide.id] = (slide.element, slide.to)
+        }
+        pending[pid] = entry
     }
 
     private func isTooSlowToAnimate(_ pid: pid_t) -> Bool {
