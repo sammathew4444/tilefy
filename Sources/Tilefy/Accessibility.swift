@@ -205,7 +205,7 @@ final class FrameWriter {
         let canSlide = work.animationDuration > 0 && !isTooSlowToAnimate(pid)
         for (id, (element, frame)) in work.frames {
             let current = AX.frame(of: element)
-            if let current, Self.isClose(current, frame) { continue }
+            if let current, Self.isExact(current, frame) { continue }
             if canSlide, let current, FrameAnimation.isWorthAnimating(from: current, to: frame, monitors: work.monitors) {
                 slides.append(Slide(id: id, element: element, from: current, to: frame))
             } else {
@@ -328,6 +328,12 @@ final class FrameWriter {
         return !entry.frames.isEmpty || !entry.hides.isEmpty || entry.focus != nil
     }
 
+    /// Whether a window is already in place, so that asking it to move would achieve nothing.
+    private static func isExact(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.minX - b.minX) < 1 && abs(a.minY - b.minY) < 1 && abs(a.width - b.width) < 1 && abs(a.height - b.height) < 1
+    }
+
+    /// Whether a window got near enough that retrying wouldn't help. Some apps round to their own grid.
     private static func isClose(_ a: CGRect, _ b: CGRect) -> Bool {
         abs(a.minX - b.minX) < 1.5 && abs(a.minY - b.minY) < 1.5 && abs(a.width - b.width) < 1.5 && abs(a.height - b.height) < 1.5
     }
