@@ -24,6 +24,13 @@ public struct Config: Codable, Equatable {
     public var showHUD: Bool = true
     /// Holding the shortcut modifier while scrolling switches workspace (vertical) or focus (horizontal).
     public var modifierScroll: Bool = true
+    /// Slides windows to their new places, instead of jumping.
+    public var animations: Bool = true
+    public var animationDuration: Double = 0.16
+    /// Swiping left and right on a trackpad moves along the row, or between workspaces.
+    public var trackpadSwipes: Bool = true
+    /// How many fingers a swipe uses: 3 or 4.
+    public var swipeFingers: Int = 4
 
     public init() {}
 
@@ -44,6 +51,10 @@ public struct Config: Codable, Equatable {
         appWorkspaces = try c.decodeIfPresent([String: Int].self, forKey: .appWorkspaces) ?? d.appWorkspaces
         showHUD = try c.decodeIfPresent(Bool.self, forKey: .showHUD) ?? d.showHUD
         modifierScroll = try c.decodeIfPresent(Bool.self, forKey: .modifierScroll) ?? d.modifierScroll
+        animations = try c.decodeIfPresent(Bool.self, forKey: .animations) ?? d.animations
+        animationDuration = try c.decodeIfPresent(Double.self, forKey: .animationDuration) ?? d.animationDuration
+        trackpadSwipes = try c.decodeIfPresent(Bool.self, forKey: .trackpadSwipes) ?? d.trackpadSwipes
+        swipeFingers = try c.decodeIfPresent(Int.self, forKey: .swipeFingers) ?? d.swipeFingers
     }
 
     /// `TILEFY_CONFIG` points at a different file, which the real-window tests use.
@@ -112,6 +123,11 @@ public struct Config: Codable, Equatable {
             "mod+r": "cycle-width", "mod+c": "center", "mod+comma": "stack", "mod+shift+comma": "unstack",
             "mod+e": "retile",
             "mod+a": "toggle-scratchpad", "mod+shift+a": "move-to-scratchpad",
+            "mod+shift+g": "toggle-group", "mod+extra+g": "remove-from-group",
+            "mod+grave": "group-next", "mod+shift+grave": "group-previous",
+            "mod+extra+left": "move-into-group-left", "mod+extra+right": "move-into-group-right",
+            "mod+extra+up": "move-into-group-up", "mod+extra+down": "move-into-group-down",
+            "mod+p": "toggle-sticky",
             "mod+extra+period": "move-workspace-to-monitor-next",
         ]
         for n in 1...9 {
@@ -237,6 +253,7 @@ public enum ShortcutCatalog {
             Item(label: "Snap back into place", command: "retile"),
             Item(label: "Show / hide scratchpad", command: "toggle-scratchpad"),
             Item(label: "Move window to scratchpad", command: "move-to-scratchpad"),
+            Item(label: "Sticky: keep on every workspace", command: "toggle-sticky"),
         ]),
         Group(title: "Layouts", items: [
             Item(label: "Toggle dwindle / scrolling", command: "layout-toggle"),
@@ -253,6 +270,16 @@ public enum ShortcutCatalog {
             Item(label: "Scrolling: center column", command: "center"),
             Item(label: "Scrolling: stack into left column", command: "stack"),
             Item(label: "Scrolling: unstack", command: "unstack"),
+        ]),
+        Group(title: "Window Groups", items: [
+            Item(label: "Make group / break up group", command: "toggle-group"),
+            Item(label: "Take window out of group", command: "remove-from-group"),
+            Item(label: "Next window in group", command: "group-next"),
+            Item(label: "Previous window in group", command: "group-previous"),
+            Item(label: "Move into group on the left", command: "move-into-group-left"),
+            Item(label: "Move into group on the right", command: "move-into-group-right"),
+            Item(label: "Move into group above", command: "move-into-group-up"),
+            Item(label: "Move into group below", command: "move-into-group-down"),
         ]),
         Group(title: "Workspaces", items: (1...9).map {
             Item(label: "Go to workspace \($0)", command: "workspace-\($0)")

@@ -87,6 +87,11 @@ final class DwindleTree {
         nodeB.window = a
     }
 
+    /// Puts another window in the same place in the tree.
+    func replace(_ old: WindowID, with new: WindowID) {
+        leaf(old)?.window = new
+    }
+
     func toggleSplit(of id: WindowID) {
         guard let parent = leaf(id)?.parent else { return }
         parent.axisOverride = parent.lastAxis.flipped
@@ -152,5 +157,42 @@ final class DwindleTree {
 
         place(root, in: bounds)
         return result
+    }
+
+    // MARK: - Saving and restoring
+
+    indirect enum Shape: Codable, Equatable {
+        case leaf(WindowID)
+        case split(ratio: CGFloat, axis: Axis?, first: Shape, second: Shape)
+    }
+
+    var shape: Shape? {
+        func describe(_ node: Node) -> Shape? {
+            if let window = node.window { return .leaf(window) }
+            guard let first = node.first.flatMap(describe), let second = node.second.flatMap(describe) else { return nil }
+            return .split(ratio: node.ratio, axis: node.axisOverride, first: first, second: second)
+        }
+        return root.flatMap(describe)
+    }
+
+    func restore(_ shape: Shape?) {
+        func build(_ shape: Shape) -> Node {
+            switch shape {
+            case let .leaf(window):
+                return Node(window: window)
+            case let .split(ratio, axis, first, second):
+                let node = Node(window: nil)
+                node.ratio = ratio
+                node.axisOverride = axis
+                let a = build(first)
+                let b = build(second)
+                a.parent = node
+                b.parent = node
+                node.first = a
+                node.second = b
+                return node
+            }
+        }
+        root = shape.map(build)
     }
 }

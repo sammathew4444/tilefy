@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import XCTest
 @testable import TilefyCore
 
@@ -44,6 +45,9 @@ final class StressTests: XCTestCase {
         "cycle-width", "center", "promote", "stack", "unstack",
         "grow-width", "shrink-width", "grow-height", "shrink-height", "balance",
         "toggle-scratchpad", "move-to-scratchpad",
+        "toggle-group", "toggle-group", "remove-from-group", "group-next", "group-previous",
+        "move-into-group-left", "move-into-group-right", "move-into-group-up", "move-into-group-down",
+        "toggle-sticky",
     ]
 
     private func check(_ engine: TilingEngine, tracked: Set<WindowID>, step: String) {
@@ -64,6 +68,28 @@ final class StressTests: XCTestCase {
             XCTAssertEqual(stripped.count, ws.order.count, "scrolling row has duplicates \(context)")
             XCTAssertFalse(ws.strip.columns.contains { $0.windows.isEmpty }, "empty column \(context)")
             XCTAssertTrue(ws.suspended.isSubset(of: Set(ws.allWindows)), "stale suspension \(context)")
+            for (slot, members) in ws.groups {
+                XCTAssertTrue(ws.order.contains(slot), "group \(slot) has no tile \(context)")
+                XCTAssertTrue(members.contains(slot), "group \(slot) doesn't list itself \(context)")
+                XCTAssertEqual(Set(members).count, members.count, "duplicate in group \(context)")
+                for member in members where member != slot {
+                    XCTAssertFalse(ws.order.contains(member), "\(member) is grouped and tiled \(context)")
+                    XCTAssertFalse(ws.floating.contains(member), "\(member) is grouped and floating \(context)")
+                }
+                // A group with anything showing keeps showing it in the tile.
+                if members.contains(where: { !ws.suspended.contains($0) }) {
+                    XCTAssertFalse(ws.suspended.contains(slot), "group \(slot) has an away tile but a member here \(context)")
+                }
+            }
+            for id in engine.stickyWindows where ws.contains(id) {
+                XCTAssertTrue(ws.isFloating(id), "sticky \(id) isn't floating \(context)")
+            }
+            if let fullscreen = ws.fullscreen {
+                XCTAssertTrue(ws.order.contains(fullscreen), "fullscreen on a window with no tile \(context)")
+            }
+            if let tile = ws.lastTiledFocus {
+                XCTAssertTrue(ws.order.contains(tile), "focus memory on a window with no tile \(context)")
+            }
             if let focused = ws.focused {
                 XCTAssertTrue(ws.contains(focused), "focus on a window from elsewhere \(context)")
                 XCTAssertFalse(ws.suspended.contains(focused), "focus on a suspended window \(context)")
@@ -175,6 +201,20 @@ final class StressTests: XCTestCase {
                 }
                 check(engine, tracked: tracked, step: "\(step) (seed \(seed), step \(stepNumber))")
                 if (testRun?.failureCount ?? 0) > 0 { return }
+
+                // At any moment, saving and restoring reproduces the same layout.
+                if stepNumber % 25 == 0 {
+                    let saved = engine.save()
+                    let data = try! JSONEncoder().encode(saved)
+                    let copy = TilingEngine(options: engine.options) { frames[$0] }
+                    copy.restore(try! JSONDecoder().decode(TilingEngine.SavedEngine.self, from: data))
+                    copy.setMonitors(engine.monitors)
+                    for ws in copy.workspaces.values {
+                        let wasAway = engine.workspaces[ws.id]?.suspended ?? []
+                        for id in ws.allWindows where !wasAway.contains(id) { ws.resume(id) }
+                    }
+                    XCTAssertEqual(copy.plan().frames.keys.sorted(), engine.plan().frames.keys.sorted(), "seed \(seed), step \(stepNumber)")
+                }
             }
         }
     }

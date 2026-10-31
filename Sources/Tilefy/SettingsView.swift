@@ -96,7 +96,7 @@ struct SettingsView: View {
             AppsTab(model: model).tag("apps").tabItem { Label("Apps", systemImage: "macwindow.on.rectangle") }
         }
         .padding(16)
-        .frame(width: 560, height: 520)
+        .frame(width: 580, height: 600)
     }
 }
 
@@ -113,56 +113,71 @@ private struct GeneralTab: View {
 
     var body: some View {
         Form {
-            Toggle("Launch at login", isOn: $launchAtLogin)
-                .onChange(of: launchAtLogin) { enabled in
-                    do {
-                        if enabled {
-                            try SMAppService.mainApp.register()
-                        } else {
-                            try SMAppService.mainApp.unregister()
+            Section {
+                Toggle("Launch at login", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { enabled in
+                        do {
+                            if enabled {
+                                try SMAppService.mainApp.register()
+                            } else {
+                                try SMAppService.mainApp.unregister()
+                            }
+                            loginError = nil
+                        } catch {
+                            loginError = error.localizedDescription
                         }
-                        loginError = nil
-                    } catch {
-                        loginError = error.localizedDescription
+                    }
+                if let loginError {
+                    Text(loginError).font(.caption).foregroundColor(.red)
+                }
+                Picker("Shortcut modifier", selection: $model.config.modifier) {
+                    ForEach(modifiers, id: \.0) { Text($0.1).tag($0.0) }
+                }
+            }
+
+            Section("Appearance") {
+                Toggle("Outline the focused window", isOn: $model.config.focusBorder)
+                Toggle("Show workspace and layout changes", isOn: $model.config.showHUD)
+                Toggle("Animate windows moving", isOn: $model.config.animations)
+            }
+
+            Section("Trackpad and mouse") {
+                Toggle("Scroll with the modifier to switch workspace or focus", isOn: $model.config.modifierScroll)
+                Toggle("Swipe to move along the row or between workspaces", isOn: $model.config.trackpadSwipes)
+                if model.config.trackpadSwipes {
+                    Picker("Swipe with", selection: $model.config.swipeFingers) {
+                        Text("Three fingers").tag(3)
+                        Text("Four fingers").tag(4)
+                    }
+                    if macOSUsesSwipe(fingers: model.config.swipeFingers) {
+                        Text("macOS also uses this swipe to switch Spaces. To turn that off, go to System Settings › Trackpad › More Gestures.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-            if let loginError {
-                Text(loginError).font(.caption).foregroundColor(.red)
             }
-
-            Picker("Shortcut modifier", selection: $model.config.modifier) {
-                ForEach(modifiers, id: \.0) { Text($0.1).tag($0.0) }
-            }
-
-            Toggle("Outline the focused window", isOn: $model.config.focusBorder)
-            Toggle("Show workspace and layout when they change", isOn: $model.config.showHUD)
-            Toggle("Scroll with the modifier held to switch workspace or focus", isOn: $model.config.modifierScroll)
 
             Section("Spacing") {
-                Stepper(value: $model.config.innerGap, in: 0...64, step: 2) {
-                    Text("Between windows: \(Int(model.config.innerGap)) pt")
-                }
-                Stepper(value: $model.config.outerGap, in: 0...64, step: 2) {
-                    Text("Screen edge: \(Int(model.config.outerGap)) pt")
-                }
+                Stepper("Between windows: \(Int(model.config.innerGap)) pt", value: $model.config.innerGap, in: 0...64, step: 2)
+                Stepper("Screen edge: \(Int(model.config.outerGap)) pt", value: $model.config.outerGap, in: 0...64, step: 2)
             }
 
             Section("Keep this space clear") {
-                Stepper(value: $model.config.reserved.top, in: 0...400, step: 4) {
-                    Text("Top: \(Int(model.config.reserved.top)) pt")
-                }
-                Stepper(value: $model.config.reserved.bottom, in: 0...400, step: 4) {
-                    Text("Bottom: \(Int(model.config.reserved.bottom)) pt")
-                }
-                Stepper(value: $model.config.reserved.left, in: 0...400, step: 4) {
-                    Text("Left: \(Int(model.config.reserved.left)) pt")
-                }
-                Stepper(value: $model.config.reserved.right, in: 0...400, step: 4) {
-                    Text("Right: \(Int(model.config.reserved.right)) pt")
-                }
+                Stepper("Top: \(Int(model.config.reserved.top)) pt", value: $model.config.reserved.top, in: 0...400, step: 4)
+                Stepper("Bottom: \(Int(model.config.reserved.bottom)) pt", value: $model.config.reserved.bottom, in: 0...400, step: 4)
+                Stepper("Left: \(Int(model.config.reserved.left)) pt", value: $model.config.reserved.left, in: 0...400, step: 4)
+                Stepper("Right: \(Int(model.config.reserved.right)) pt", value: $model.config.reserved.right, in: 0...400, step: 4)
             }
         }
+        .formStyle(.grouped)
     }
+}
+
+/// Whether macOS's own "swipe between full-screen apps" gesture is set to this number of fingers.
+private func macOSUsesSwipe(fingers: Int) -> Bool {
+    let key = fingers == 3 ? "TrackpadThreeFingerHorizSwipeGesture" : "TrackpadFourFingerHorizSwipeGesture"
+    return UserDefaults(suiteName: "com.apple.AppleMultitouchTrackpad")?.integer(forKey: key) == 2
 }
 
 private struct LayoutsTab: View {

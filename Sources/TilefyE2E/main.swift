@@ -18,6 +18,12 @@ func runFixture(count: Int) -> Never {
     var windows: [NSWindow] = []
     let colors: [NSColor] = [.systemBlue, .systemPurple, .systemTeal, .systemOrange, .systemPink, .systemGreen, .systemIndigo]
 
+    // Written to a file on request, so the driver can see how many steps each move took.
+    var moveCount = 0
+    for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+        NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in moveCount += 1 }
+    }
+
     func open() {
         let window = NSWindow(
             contentRect: NSRect(x: 200 + windows.count * 30, y: 200 + windows.count * 30, width: 420, height: 300),
@@ -51,6 +57,8 @@ func runFixture(count: Int) -> Never {
             if let window { window.minSize = window.frame.size }
         case "allow-resizes":
             window?.minSize = NSSize(width: 100, height: 100)
+        case "report-moves":
+            try? String(moveCount).write(toFile: NSTemporaryDirectory() + "tilefy-e2e-moves", atomically: true, encoding: .utf8)
         case "quit": exit(0)
         default: break
         }
@@ -175,19 +183,28 @@ try Data(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle"}"#.utf8).wr
 capture("/usr/bin/pkill", ["-x", "Tilefy"])
 pump(0.5)
 
-var tilefy: Process?
-if launchWithOpen {
-    // Through Launch Services, so macOS checks Tilefy's own Accessibility permission.
-    capture("/usr/bin/open", ["-n", appArgument, "--env", "TILEFY_CONFIG=\(configPath)", "--args", "--only-app=TilefyE2E"])
-} else {
-    // As a child process, so macOS checks the permission of whatever is running this program (CI).
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: tilefyBinary)
-    process.arguments = ["--only-app=TilefyE2E"]
-    process.environment = ProcessInfo.processInfo.environment.merging(["TILEFY_CONFIG": configPath]) { _, new in new }
-    try process.run()
-    tilefy = process
+let statePath = NSTemporaryDirectory() + "tilefy-e2e-state-\(getpid()).json"
+
+func launchTilefy() {
+    if launchWithOpen {
+        // Through Launch Services, so macOS checks Tilefy's own Accessibility permission.
+        capture("/usr/bin/open", [
+            "-n", appArgument,
+            "--env", "TILEFY_CONFIG=\(configPath)", "--env", "TILEFY_STATE=\(statePath)", "--env", "TILEFY_IGNORE_REDUCE_MOTION=1",
+            "--args", "--only-app=TilefyE2E",
+        ])
+    } else {
+        // As a child process, so macOS checks the permission of whatever is running this program (CI).
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tilefyBinary)
+        process.arguments = ["--only-app=TilefyE2E"]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "TILEFY_CONFIG": configPath, "TILEFY_STATE": statePath, "TILEFY_IGNORE_REDUCE_MOTION": "1",
+        ]) { _, new in new }
+        try? process.run()
+    }
 }
+launchTilefy()
 
 func cleanUp() {
     capture("/usr/bin/pkill", ["-x", "Tilefy"])
@@ -195,6 +212,7 @@ func cleanUp() {
     pump(0.3)
     if fixture.isRunning { fixture.terminate() }
     try? FileManager.default.removeItem(atPath: configPath)
+    try? FileManager.default.removeItem(atPath: statePath)
 }
 
 func dispatch(_ command: String) {
@@ -261,6 +279,13 @@ func isTiled(count: Int) -> Bool {
     return rects.count == count && noneOverlap(rects) && coversScreen(rects, gaps: count)
 }
 
+/// Grouped windows share a frame, so this counts tiles, not windows.
+func uniqueFrames() -> [CGRect] {
+    var seen: [CGRect] = []
+    for frame in frames().values where !seen.contains(frame) { seen.append(frame) }
+    return seen
+}
+
 func describe() -> String {
     "\(frames().sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }) screen \(screenArea())"
 }
@@ -318,6 +343,74 @@ check("monocle makes every window fill the screen", waitUntil {
     let rects = Array(frames().values)
     return rects.count == 3 && rects.allSatisfy { abs($0.width - screenArea().width) < areaTolerance && abs($0.height - screenArea().height) < areaTolerance }
 }, describe())
+
+section("Animations")
+func dispatchWithoutWaiting(_ command: String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: tilefyBinary)
+    process.arguments = ["dispatch", command]
+    try? process.run()
+}
+
+func writeConfig(_ json: String) {
+    try? Data(json.utf8).write(to: URL(fileURLWithPath: configPath))
+    dispatch("reload-config")
+    pump(0.5)
+}
+
+/// How many times the fixture's windows moved or resized, as counted by the fixture itself.
+func moveCount() -> Int {
+    let path = NSTemporaryDirectory() + "tilefy-e2e-moves"
+    try? FileManager.default.removeItem(atPath: path)
+    control("report-moves")
+    var count = 0
+    _ = waitUntil(timeout: 3) {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8), let value = Int(text) else { return false }
+        count = value
+        return true
+    }
+    return count
+}
+
+/// How many steps a layout change takes.
+func movesDuring(_ command: String) -> Int {
+    dispatch("layout-master")
+    _ = waitUntil { isTiled(count: 3) }
+    pump(1.2)
+    let before = moveCount()
+    dispatch(command)
+    _ = waitUntil { isTiled(count: 3) }
+    pump(1.2)
+    return moveCount() - before
+}
+
+writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle", "animationDuration": 0.5}"#)
+let animatedMoves = movesDuring("layout-dwindle")
+writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle", "animations": false}"#)
+let instantMoves = movesDuring("layout-dwindle")
+print("  note  a layout change took \(animatedMoves) window moves when animated, \(instantMoves) when instant")
+check("animated moves go through in-between positions", animatedMoves > instantMoves * 2, "\(animatedMoves) moves, against \(instantMoves) when instant")
+check("and end up exactly tiled", isTiled(count: 3), describe())
+
+// A second command mid-slide must not strand a window partway. A float's position is only sent once,
+// so it's the one at risk.
+writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle", "animationDuration": 0.6}"#)
+if let window = status()?.focusedWindow {
+    dispatchWithoutWaiting("toggle-float")
+    pump(0.25)
+    dispatchWithoutWaiting("retile")
+    pump(0.15)
+    dispatchWithoutWaiting("retile")
+    check("a window interrupted mid-slide still arrives", waitUntil {
+        guard let frame = frames()[Int(window)] else { return false }
+        return abs(frame.midX - screenArea().midX) < areaTolerance && abs(frame.midY - screenArea().midY) < areaTolerance
+    }, describe())
+    dispatch("toggle-float")
+    _ = waitUntil { isTiled(count: 3) }
+}
+
+writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle"}"#)
+_ = waitUntil { isTiled(count: 3) }
 
 section("Focus")
 dispatch("focus-next")
@@ -415,6 +508,73 @@ if let window = status()?.focusedWindow {
     _ = waitUntil { frames()[Int(window)].map { !isParked($0) } ?? false }
     dispatch("toggle-float")
     check("floating it back into the layout", waitUntil { isTiled(count: 3) }, describe())
+}
+
+section("Window groups")
+if let first = status()?.focusedWindow {
+    dispatch("toggle-group")
+    pump(0.3)
+    control("open")
+    check("a new window joins the group, sharing its tile", waitUntil {
+        guard let newest = status()?.focusedWindow, newest != first,
+              let a = frames()[Int(first)], let b = frames()[Int(newest)]
+        else { return false }
+        return frames().count == 4 && a == b
+    }, describe())
+    check("the layout still has three tiles", uniqueFrames().count == 3 && noneOverlap(uniqueFrames()), describe())
+    screenshot("window-group")
+    let newest = status()?.focusedWindow
+    check("the newest member is in front", waitUntil { fixtureWindows().first?.id == newest.map(Int.init) })
+    dispatch("group-next")
+    check("cycling brings the other member forward", waitUntil { fixtureWindows().first?.id == Int(first) && status()?.focusedWindow == first }, "front is \(String(describing: fixtureWindows().first?.id))")
+    dispatch("toggle-group")
+    check("breaking up the group gives each its own tile", waitUntil { isTiled(count: 4) }, describe())
+    if let newest {
+        control("close:\(newest)")
+        check("back to three", waitUntil { isTiled(count: 3) }, describe())
+    }
+
+    // Moving into a group in a direction, and back out.
+    dispatch("layout-grid")
+    _ = waitUntil { isTiled(count: 3) }
+    pump(0.4)
+    if let focused = status()?.focusedWindow {
+        // In this grid there's something either above or below it, depending on which row it's in.
+        let isTopRow = (frames()[Int(focused)]?.minY ?? 0) < screenArea().midY
+        dispatch(isTopRow ? "move-into-group-down" : "move-into-group-up")
+        check("a window can move into a group next to it", waitUntil { uniqueFrames().count == 2 }, describe())
+        dispatch("remove-from-group")
+        check("and come back out", waitUntil { status()?.focusedWindow == focused && isTiled(count: 3) }, describe())
+    }
+    dispatch("layout-dwindle")
+    _ = waitUntil { isTiled(count: 3) }
+}
+
+section("Sticky windows")
+if let window = status()?.focusedWindow {
+    dispatch("toggle-sticky")
+    check("a sticky window floats", waitUntil {
+        guard let frame = frames()[Int(window)] else { return false }
+        return abs(frame.midX - screenArea().midX) < areaTolerance
+    }, describe())
+    pump(0.3)
+    let stuck = frames()[Int(window)]
+    dispatch("workspace-5")
+    check("it stays on screen across workspaces", waitUntil {
+        status()?.workspace == 5 && frames().filter { $0.key != Int(window) }.values.allSatisfy(isParked)
+    }, describe())
+    check("exactly where it was", frames()[Int(window)] == stuck, describe())
+    screenshot("sticky")
+    pump(2)
+    check("it's the focus on the new workspace", status()?.focusedWindow == window && status()?.workspace == 5)
+    dispatch("toggle-float")
+    pump(0.5)
+    dispatch("workspace-1")
+    check("tiling it ends being sticky, so it stays behind", waitUntil { frames()[Int(window)].map(isParked) ?? false }, describe())
+    dispatch("workspace-5")
+    _ = waitUntil { status()?.workspace == 5 }
+    dispatch("move-to-workspace-1")
+    check("and it can rejoin the others", waitUntil { status()?.workspace == 1 && isTiled(count: 3) }, describe())
 }
 
 section("Scrolling layout")
@@ -637,25 +797,45 @@ if testLoginItem {
     }
     dispatch("open-settings-general")
     pump(1.2)
-    if let window = tilefySettingsWindow() {
-        let checkbox = CGPoint(x: window.minX + 177, y: window.minY + 133)
-        func clickCheckbox() {
-            mousePost(.mouseMoved, checkbox)
-            pump(0.2)
-            mousePost(.leftMouseDown, checkbox)
-            pump(0.1)
-            mousePost(.leftMouseUp, checkbox)
-            pump(1.5)
-        }
+
+    // In a grouped form the switch has no name of its own, and comes right after its label.
+    var controls: [(role: String, name: String, element: AXUIElement)] = []
+    func collect(_ element: AXUIElement, depth: Int = 0) {
+        var role: CFTypeRef?
+        var title: CFTypeRef?
+        var label: CFTypeRef?
+        var value: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+        AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &title)
+        AXUIElementCopyAttributeValue(element, kAXDescriptionAttribute as CFString, &label)
+        AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value)
+        let name = [title as? String, label as? String, value as? String].compactMap { $0 }.joined(separator: " ")
+        controls.append((role as? String ?? "?", name, element))
+        var children: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children)
+        guard depth < 24, let list = children as? [AXUIElement] else { return }
+        for child in list { collect(child, depth: depth + 1) }
+    }
+
+    func findCheckbox(_ app: AXUIElement) -> AXUIElement? {
+        collect(app)
+        guard let labelIndex = controls.firstIndex(where: { $0.name.contains("Launch at login") }) else { return nil }
+        return controls[labelIndex...].first { $0.role == kAXCheckBoxRole }?.element
+    }
+
+    if let pid = capture("/usr/bin/pgrep", ["-x", "Tilefy"]).output.split(separator: "\n").first.flatMap({ Int32($0) }),
+       let checkbox = findCheckbox(AXUIElementCreateApplication(pid)) {
         check("not registered at first", !loginItemRegistered())
-        clickCheckbox()
+        AXUIElementPerformAction(checkbox, kAXPressAction as CFString)
+        pump(1.5)
         screenshot("login-item-on")
         check("turning it on registers a login item", waitUntil { loginItemRegistered() })
-        clickCheckbox()
+        AXUIElementPerformAction(checkbox, kAXPressAction as CFString)
+        pump(1.5)
         screenshot("login-item-off")
         check("turning it off removes it", waitUntil { !loginItemRegistered() })
     } else {
-        check("the Settings window opened", false)
+        check("found the Launch at login checkbox", false, "\(controls.prefix(30).map { "\($0.role): \($0.name)" })")
     }
 }
 
@@ -759,6 +939,41 @@ if testSecondDisplay {
     } else {
         print("  skip  this machine won't create a virtual display")
     }
+}
+
+section("Restarting Tilefy")
+func tilefyPID() -> Int32? {
+    capture("/usr/bin/pgrep", ["-x", "Tilefy"]).output.split(separator: "\n").first.flatMap { Int32($0) }
+}
+
+func restartAndCheck(signal: Int32, name: String) {
+    let beforeFrames = frames()
+    let beforeStatus = status()
+    pump(1.5)  // Long enough for the state to be saved.
+    if let pid = tilefyPID() { kill(pid, signal) }
+    _ = waitUntil { tilefyPID() == nil }
+    pump(0.5)
+    launchTilefy()
+    check("\(name): it comes back", waitUntil(timeout: 10) { status()?.started == true })
+    check("\(name): every window is back where it was", waitUntil { same(frames(), beforeFrames) }, describe())
+    let afterStatus = status()
+    check("\(name): the same workspaces and layout", afterStatus?.windows == beforeStatus?.windows && afterStatus?.layout == beforeStatus?.layout && afterStatus?.workspace == beforeStatus?.workspace, "\(String(describing: afterStatus)) vs \(String(describing: beforeStatus))")
+}
+
+dispatch("workspace-1")
+dispatch("layout-master")
+_ = waitUntil { status()?.layout == "master" }
+if let window = status()?.focusedWindow {
+    dispatch("send-to-workspace-4")
+    _ = waitUntil { frames()[Int(window)].map(isParked) ?? false }
+    pump(0.5)
+    restartAndCheck(signal: SIGTERM, name: "after quitting")
+    check("a parked window stays parked", frames()[Int(window)].map(isParked) ?? false, describe())
+    restartAndCheck(signal: SIGKILL, name: "after a crash")
+    dispatch("workspace-4")
+    check("its workspace still works", waitUntil { frames()[Int(window)].map { !isParked($0) } ?? false }, describe())
+    dispatch("workspace-1")
+    _ = waitUntil { status()?.workspace == 1 }
 }
 
 section("Pause and quit")

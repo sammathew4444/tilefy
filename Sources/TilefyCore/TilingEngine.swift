@@ -52,6 +52,8 @@ public final class TilingEngine {
     private(set) var lastFrames: [WindowID: CGRect] = [:]
     /// Windows that belong to the scratchpad, whether currently shown or tucked away.
     private var scratchpadMembers: Set<WindowID> = []
+    /// Floating windows that follow you from workspace to workspace.
+    public private(set) var stickyWindows: Set<WindowID> = []
     /// Never shown as a workspace. Its windows visit the active workspace as floats.
     static let scratchpadID = 0
 
@@ -171,6 +173,9 @@ public final class TilingEngine {
         let ws = workspace(target)
         if floating {
             ws.insertFloating(id)
+        } else if let tile = ws.lastTiledFocus, ws.groups[tile] != nil {
+            // A new window opened from a group joins it, as on Hyprland.
+            ws.addToGroup(id, target: tile)
         } else {
             ws.insertTiled(id)
         }
@@ -182,6 +187,7 @@ public final class TilingEngine {
         floatFrames[id] = nil
         parkedFloats.remove(id)
         scratchpadMembers.remove(id)
+        stickyWindows.remove(id)
         tightenScrolling()
     }
 
@@ -226,6 +232,14 @@ public final class TilingEngine {
 
         // Remember floats on the outgoing workspace before they are parked.
         if let outgoing = active[destination], let ws = workspaces[outgoing], outgoing != id {
+            // Sticky windows come along instead, and stay exactly where they are.
+            for window in ws.floating where stickyWindows.contains(window) {
+                let wasAway = ws.suspended.contains(window)
+                ws.remove(window)
+                target.insertFloating(window)
+                if wasAway { target.suspend(window) }
+                if target.focused == nil, !wasAway { target.setFocused(window) }
+            }
             for window in ws.floating {
                 if !parkedFloats.contains(window), let frame = currentFrame(window) {
                     floatFrames[window] = frame
@@ -260,9 +274,20 @@ public final class TilingEngine {
         let wasFloating = source.isFloating(id)
         let frame = wasFloating ? currentFrame(id) : nil
         let sourceMonitor = monitorID(showing: source.id)
+        // A group travels together.
+        let companions = (source.groupSlot(of: id).flatMap { source.groups[$0] } ?? []).filter { $0 != id }
+        let wasGroup = source.groupSlot(of: id) != nil
+        source.activateInGroup(id)
+        companions.forEach { source.remove($0) }
         source.remove(id)
         scratchpadMembers.remove(id)
+        stickyWindows.remove(id)
         let destination = workspace(target)
+        defer {
+            for member in companions { destination.addToGroup(member, target: destination.groupSlot(of: id) ?? id) }
+            if wasGroup, destination.groupSlot(of: id) == nil { destination.toggleGroup(id) }
+            destination.activateInGroup(id)
+        }
         if wasFloating {
             destination.insertFloating(id)
             floatFrames[id] = frame
@@ -281,6 +306,16 @@ public final class TilingEngine {
             tightenScrolling()
         }
     }
+
+    /// Whether a window is in a group, and its place there, for showing on screen.
+    public func groupPosition(of id: WindowID) -> (index: Int, count: Int)? {
+        guard let ws = workspace(containing: id), let slot = ws.groupSlot(of: id), let members = ws.groups[slot],
+              let index = members.firstIndex(of: id)
+        else { return nil }
+        return (index + 1, members.count)
+    }
+
+    public func isSticky(_ id: WindowID) -> Bool { stickyWindows.contains(id) }
 
     private func centered(_ size: CGSize, on monitor: Monitor, cascade: Int = 0) -> CGRect {
         let area = bounds(of: monitor)
@@ -325,6 +360,7 @@ public final class TilingEngine {
         let wasFloating = source.isFloating(id)
         let frame = currentFrame(id)
         source.remove(id)
+        stickyWindows.remove(id)
         workspace(Self.scratchpadID).insertFloating(id)
         scratchpadMembers.insert(id)
         if wasFloating { floatFrames[id] = frame }
@@ -413,13 +449,28 @@ public final class TilingEngine {
             if let ws, let focused { ws.toggleSplit(of: focused) }
         case .toggleFloat:
             if let ws, let focused {
-                ws.toggleFloating(focused)
-                if !ws.isFloating(focused) { scratchpadMembers.remove(focused) }
-                // A newly floated window lifts out of its tile, centered, so what's behind shows.
-                if ws.isFloating(focused), let monitor = monitor(focusedMonitor) {
-                    let area = bounds(of: monitor)
-                    floatFrames[focused] = area.insetBy(dx: area.width * 0.2, dy: area.height * 0.15)
-                    parkedFloats.insert(focused)
+                toggleFloat(focused, in: ws)
+            }
+        case .toggleGroup:
+            if let ws, let focused, !ws.isFloating(focused) { ws.toggleGroup(focused) }
+        case .removeFromGroup:
+            if let ws, let focused { ws.removeFromGroup(focused) }
+        case .groupNext:
+            if let ws, let focused { ws.cycleGroup(of: focused, by: 1) }
+        case .groupPrevious:
+            if let ws, let focused { ws.cycleGroup(of: focused, by: -1) }
+        case let .moveIntoGroup(direction):
+            if let ws, let focused, !ws.isFloating(focused), let monitor = monitor(focusedMonitor) {
+                let frames = ws.frames(in: bounds(of: monitor), gap: options.innerGap)
+                if ws.layout != .monocle, let target = neighbor(of: focused, direction: direction, in: frames) {
+                    ws.moveIntoGroup(focused, target: target)
+                }
+            }
+        case .toggleSticky:
+            if let ws, let focused {
+                if stickyWindows.remove(focused) == nil {
+                    if !ws.isFloating(focused) { toggleFloat(focused, in: ws) }
+                    stickyWindows.insert(focused)
                 }
             }
         case .fullscreen:
@@ -457,6 +508,20 @@ public final class TilingEngine {
             ws?.balance()
         case .retile, .close:
             break
+        }
+    }
+
+    private func toggleFloat(_ id: WindowID, in ws: Workspace) {
+        ws.toggleFloating(id)
+        if !ws.isFloating(id) {
+            scratchpadMembers.remove(id)
+            stickyWindows.remove(id)
+        }
+        // A newly floated window lifts out of its tile, centered, so what's behind shows.
+        if ws.isFloating(id), let monitor = monitor(focusedMonitor) {
+            let area = bounds(of: monitor)
+            floatFrames[id] = area.insetBy(dx: area.width * 0.2, dy: area.height * 0.15)
+            parkedFloats.insert(id)
         }
     }
 
@@ -574,10 +639,14 @@ public final class TilingEngine {
 
             for (id, frame) in ws.frames(in: area, gap: options.innerGap) {
                 layoutFrames[id] = frame
-                if shouldHide(frame, in: area, monitor: monitor, others: others) {
-                    plan.hidden[id] = monitor.id
-                } else {
-                    plan.frames[id] = frame
+                let hide = shouldHide(frame, in: area, monitor: monitor, others: others)
+                // Grouped windows share the tile of the one showing.
+                for window in [id] + ws.visibleBehind(id) {
+                    if hide {
+                        plan.hidden[window] = monitor.id
+                    } else {
+                        plan.frames[window] = frame
+                    }
                 }
             }
             for id in ws.floating where !ws.suspended.contains(id) && parkedFloats.remove(id) != nil {
@@ -606,5 +675,62 @@ public final class TilingEngine {
         if area.contains(frame) { return false }
         if !frame.intersects(monitor.frame) || frame.intersection(area).width < 1 { return true }
         return others.contains { frame.intersects($0.frame) }
+    }
+
+    // MARK: - Saving and restoring
+
+    struct SavedEngine: Codable, Equatable {
+        var workspaces: [SavedWorkspace]
+        var active: [MonitorID: Int]
+        var focusedMonitor: MonitorID?
+        var previousWorkspace: Int?
+        var floatFrames: [WindowID: CGRect]
+        var scratchpadMembers: [WindowID]
+        var stickyWindows: [WindowID]
+    }
+
+    func save() -> SavedEngine {
+        SavedEngine(
+            workspaces: workspaces.values.sorted { $0.id < $1.id }.map(\.saved),
+            active: active,
+            focusedMonitor: focusedMonitor,
+            previousWorkspace: previousWorkspace,
+            floatFrames: floatFrames,
+            scratchpadMembers: scratchpadMembers.sorted(),
+            stickyWindows: stickyWindows.sorted()
+        )
+    }
+
+    /// Restores a saved state exactly, with every window marked away until it's found on screen.
+    /// Call before `setMonitors`, which sorts out any displays that have changed since.
+    func restore(_ saved: SavedEngine) {
+        workspaces = Dictionary(uniqueKeysWithValues: saved.workspaces.map { ($0.id, Workspace(restoring: $0)) })
+        active = saved.active
+        focusedMonitor = saved.focusedMonitor
+        previousWorkspace = saved.previousWorkspace
+        floatFrames = saved.floatFrames
+        scratchpadMembers = Set(saved.scratchpadMembers)
+        stickyWindows = Set(saved.stickyWindows)
+    }
+
+    /// Restores just each workspace's layout, for when the windows themselves are gone (after a reboot).
+    func restoreLayouts(_ saved: SavedEngine) {
+        for ws in saved.workspaces where ws.id != Self.scratchpadID {
+            let target = workspace(ws.id)
+            target.layout = ws.layout
+            target.masterRatio = ws.masterRatio
+            target.monitor = ws.monitor
+        }
+        active = saved.active
+        focusedMonitor = saved.focusedMonitor
+    }
+
+    /// Everything still marked away after a restore. They may be minimized, or truly gone.
+    func windowsStillAway() -> [(id: WindowID, workspace: Int, floating: Bool)] {
+        workspaces.values.flatMap { ws in
+            ws.allWindows
+                .filter { ws.suspended.contains($0) }
+                .map { (id: $0, workspace: ws.id, floating: ws.isFloating($0)) }
+        }
     }
 }

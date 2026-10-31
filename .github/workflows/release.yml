@@ -1,0 +1,41 @@
+name: Release
+
+# Pushing a tag like v0.3.0 builds the universal app, tests that exact build on real windows, and
+# publishes it as a GitHub release.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: swift test
+      - name: Build the universal app
+        run: scripts/build-app.sh --universal
+      - name: Check it runs on both kinds of Mac
+        run: |
+          lipo -archs build/Tilefy.app/Contents/MacOS/Tilefy | tee /dev/stderr | grep -q "x86_64 arm64"
+      - name: Build the test runner
+        run: swift build -c release --product TilefyE2E
+      - name: Grant Accessibility permission
+        run: scripts/ci-grant-accessibility.sh "$(swift build -c release --show-bin-path)/TilefyE2E" "$PWD/build/Tilefy.app/Contents/MacOS/Tilefy"
+      - name: Real-window tests against this build
+        run: |
+          "$(swift build -c release --show-bin-path)/TilefyE2E" "$PWD/build/Tilefy.app" screenshots --second-display
+        timeout-minutes: 8
+      - name: Package
+        run: ditto -c -k --keepParent build/Tilefy.app Tilefy.zip
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" Tilefy.zip \
+            --title "Tilefy ${GITHUB_REF_NAME#v}" \
+            --notes-file docs/release-notes.md

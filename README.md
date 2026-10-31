@@ -27,7 +27,25 @@ Integrity Protection.
 
 ## Install
 
-There's no prebuilt download yet, so build it from source. You need Xcode or its command line tools.
+### Download
+
+Get `Tilefy.zip` from the [latest release](https://github.com/sammathew4444/tilefy/releases/latest), and
+move `Tilefy.app` to `/Applications`. It runs on Apple silicon and Intel Macs.
+
+Tilefy isn't notarized, because that requires a paid Apple Developer membership, so macOS blocks it at
+first. Run this once:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Tilefy.app
+```
+
+Open it, and turn on Tilefy under System Settings › Privacy & Security › Accessibility. Tiling starts
+straight away. Downloaded builds are signed ad-hoc, so after updating you'll need to turn that switch
+off and on again.
+
+### Build from source
+
+You need Xcode or its command line tools.
 
 ```sh
 git clone https://github.com/sammathew4444/tilefy.git
@@ -35,8 +53,10 @@ cd tilefy
 scripts/build-app.sh --install
 ```
 
-This copies the app to `/Applications` and launches it. Turn on Tilefy under System Settings ›
-Privacy & Security › Accessibility, and tiling starts straight away.
+If you have an Apple Development certificate, the build uses it, and the Accessibility permission then
+survives rebuilds.
+
+### Before you start
 
 **This rearranges all your open windows.** To undo that, use the menu bar icon: Pause Tiling and Quit
 both bring any windows parked out of sight back on-screen. To try it on one app first, run:
@@ -82,6 +102,7 @@ clicking it, in Settings.
 | `⌃⌥1`…`9` | Go to workspace |
 | `⌃⌥⇧1`…`9` | Move window to workspace, and follow it |
 | `⌃⌥⌘1`…`9` | Send window to workspace, and stay |
+| `⌃⌥P` | Sticky: keep the window on every workspace |
 | `⌃⌥⇥` / `⌃⌥⇧⇥` / `⌃⌥⌘⇥` | Next / previous / last workspace |
 | `⌃⌥.` / `⌃⌥⇧.` / `⌃⌥⌘.` | Focus next display / move window to it / move workspace to it |
 
@@ -95,11 +116,25 @@ Layout-specific:
 | `⌃⌥C` | Scrolling | Center the column |
 | `⌃⌥,` / `⌃⌥⇧,` | Scrolling | Stack into the left column / unstack |
 
-With the mouse:
+Window groups, where several windows share one tile and one shows at a time:
+
+| Keys | Action |
+| --- | --- |
+| `⌃⌥⇧G` | Make a group from this tile, or break up its group. New windows then join it |
+| `⌃⌥⌘ ←↑↓→` | Move this window into the group in that direction |
+| `⌃⌥⌘G` | Take this window out of its group |
+| `` ⌃⌥` `` / `` ⌃⌥⇧` `` | Next / previous window in the group |
+
+The focused window's outline is purple in a group, and orange when sticky.
+
+With the mouse and trackpad:
 
 - Drag a window onto another to swap them, or onto another display to move it there.
 - Drag a window's edge to resize the layout around it.
 - Hold `⌃⌥` and scroll: up and down switch workspace, left and right move focus.
+- Swipe left or right with four fingers (or three, in Settings) to move along the row in the scrolling
+  layout, or between workspaces in the others. macOS's own swipe between Spaces can use the same
+  fingers. Settings tells you if it does, and where to turn it off.
 
 ## Configuration
 
@@ -113,6 +148,8 @@ that file, listing only what you want to change, then choose Reload Config File 
   "reserved": { "top": 30 },
   "floatApps": ["com.apple.calculator"],
   "appWorkspaces": { "com.apple.Mail": 4 },
+  "animationDuration": 0.2,
+  "swipeFingers": 3,
   "bindings": { "mod+y": "layout-grid", "mod+w": "none" }
 }
 ```
@@ -130,6 +167,7 @@ tilefy=/Applications/Tilefy.app/Contents/MacOS/Tilefy
 $tilefy dispatch workspace-2
 $tilefy dispatch layout-grid
 $tilefy status
+$tilefy dispatch reload-config
 ```
 
 ## How it works
@@ -143,6 +181,11 @@ $tilefy status
   switching instant.
 - **Native Spaces still work.** Windows on other Spaces take no room in the current layout, and return
   to their slot when you come back.
+- **Your layout survives.** State is saved to `~/.config/tilefy/state.json`. A restart of Tilefy, even a
+  crash, restores everything exactly. After a reboot the windows are new ones, so each app's windows
+  are matched to their old workspaces by title and app, for three minutes after launch.
+- **Animations stop when they'd get in the way.** They respect Reduce Motion, only run between on-screen
+  places, and an app too slow to keep up simply jumps to its place for the next minute.
 
 ## Testing
 
@@ -159,18 +202,24 @@ scripts/e2e.sh --open       # Real windows. Needs Accessibility permission for T
   that no window has been lost and no layout is impossible.
 - **Real-window tests** drive the actual app against actual windows, with synthesized keyboard and
   mouse input, and read positions back from the window server. They run on every push on GitHub's
-  macOS runners. On your own Mac they quit any running Tilefy and manage only their own test windows.
+  macOS runners, and cover native fullscreen, a virtual second display, restarts and crashes, and each
+  release build. On your own Mac they quit any running Tilefy and manage only their own test windows.
 
-CI runners have a single display, so multi-display behaviour and native Spaces are covered by the
-simulated tests only. Reports from real setups are especially welcome.
+Physical trackpad swipes can't be synthesized, so only the swipe recognizer is tested automatically, on
+recorded-style finger positions. Native Spaces are tested through native fullscreen, which is a real
+Space switch. Reports from real setups are especially welcome. Tilefy logs what it does with:
+
+```sh
+log show --last 10m --predicate 'subsystem == "app.tilefy"'
+```
 
 ## Limitations
 
-- No window animations, or three- and four-finger trackpad swipes. Both would mean relying on
-  janky or private APIs.
+- Window groups have no tab bar. Which member is showing appears briefly on screen when it changes.
+- A swipe can't be taken away from macOS, so if macOS uses the same number of fingers, both react.
 - Tilefy uses one private API, `_AXUIElementGetWindow`, as most Mac window managers do. That rules out
   the Mac App Store.
-- Workspace assignments aren't remembered across restarts of Tilefy.
+- Downloads aren't notarized.
 
 ## Acknowledgements
 

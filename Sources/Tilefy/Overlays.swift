@@ -13,10 +13,17 @@ final class FocusBorder {
         return panel
     }()
 
-    func show(around frame: CGRect, width: Double) {
+    func show(around frame: CGRect, width: Double, style: BorderStyle) {
         let inset = CGFloat(width)
         let rect = Displays.appKitRect(frame).insetBy(dx: -inset, dy: -inset)
-        panel.contentView?.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        // Windows in a group are stacked, and a sticky one stays put, so both look a little different.
+        let color: NSColor
+        switch style {
+        case .normal: color = .controlAccentColor
+        case .grouped: color = .systemPurple
+        case .sticky: color = .systemOrange
+        }
+        panel.contentView?.layer?.borderColor = color.cgColor
         panel.contentView?.layer?.borderWidth = inset
         panel.setFrame(rect, display: true)
         panel.orderFrontRegardless()
@@ -155,5 +162,51 @@ final class ModifierScrollTap {
         // This callback must return quickly, or macOS disables the tap and scrolling stutters.
         DispatchQueue.main.async { [onScroll] in onScroll(dx, dy) }
         return nil
+    }
+}
+
+/// Watches the trackpad for swipes. It only listens: every event carries on as normal, so it can't
+/// slow down or swallow anything. macOS has no way to take a gesture away from Mission Control, which
+/// is why Settings points out when the two overlap.
+final class TrackpadSwipeTap {
+    private var tap: CFMachPort?
+    private var source: CFRunLoopSource?
+    private let onTouches: ([CGPoint]) -> Void
+
+    init?(onTouches: @escaping ([CGPoint]) -> Void) {
+        self.onTouches = onTouches
+        let gestureEvents = CGEventMask(1) << CGEventMask(NSEvent.EventType.gesture.rawValue)
+        let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: gestureEvents,
+            callback: { _, type, event, refcon in
+                guard let refcon else { return Unmanaged.passUnretained(event) }
+                Unmanaged<TrackpadSwipeTap>.fromOpaque(refcon).takeUnretainedValue().handle(type, event)
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        )
+        guard let tap else { return nil }
+        self.tap = tap
+        source = CFMachPortCreateRunLoopSource(nil, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+    }
+
+    func invalidate() {
+        if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        if let tap { CFMachPortInvalidate(tap) }
+        source = nil
+        tap = nil
+    }
+
+    private func handle(_ type: CGEventType, _ event: CGEvent) {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            return
+        }
+        guard let gesture = NSEvent(cgEvent: event), gesture.type == .gesture else { return }
+        onTouches(gesture.touches(matching: .touching, in: nil).map(\.normalizedPosition))
     }
 }

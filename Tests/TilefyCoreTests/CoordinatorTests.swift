@@ -714,4 +714,350 @@ final class CoordinatorTests: XCTestCase {
         coordinator.displaysChanged()
         XCTAssertEqual(mac.windows[1]!.frame.maxY, 1000 - 100 - 8)
     }
+
+    // MARK: - Saving and restoring
+
+    /// What quitting and relaunching Tilefy does, with the same windows still open.
+    private func restartTilefy(config: Config = Config()) {
+        coordinator.stop()
+        coordinator = WindowCoordinator(config: config, system: mac)
+        coordinator.start()
+        mac.advance(0.5)
+    }
+
+    func testARestartRestoresEverythingExactly() {
+        start(windows: 4)
+        coordinator.run("focus-left")
+        coordinator.run("grow-width")
+        coordinator.run("toggle-split")
+        coordinator.run("move-to-workspace-3")
+        coordinator.run("layout-grid")
+        coordinator.run("workspace-1")
+        mac.advance(1.5)
+        let frames = mac.windows.mapValues(\.frame)
+        let status = coordinator.status()
+
+        restartTilefy()
+        XCTAssertEqual(coordinator.status(), status)
+        XCTAssertEqual(mac.windows.mapValues(\.frame), frames)
+        XCTAssertEqual(coordinator.engine.workspaces[3]?.layout, .grid)
+    }
+
+    func testARestartRestoresFloatsAndGroupsAndSticky() {
+        start(windows: 3)
+        coordinator.run("toggle-group")
+        mac.open(4)
+        settle()
+        XCTAssertEqual(coordinator.engine.groupPosition(of: 4)?.count, 2)
+        coordinator.run("focus-left")
+        coordinator.run("toggle-sticky")
+        let floater = coordinator.engine.focusedWindow!
+        restartTilefy()
+        XCTAssertEqual(coordinator.engine.groupPosition(of: 4)?.count, 2)
+        XCTAssertTrue(coordinator.engine.isSticky(floater))
+        XCTAssertEqual(coordinator.engine.workspace(containing: floater)?.isFloating(floater), true)
+    }
+
+    func testARestartForgetsWindowsThatClosedMeanwhile() {
+        start(windows: 3)
+        mac.advance(1.5)
+        coordinator.stop()
+        mac.close(window: 2)
+        coordinator = WindowCoordinator(config: Config(), system: mac)
+        coordinator.start()
+        XCTAssertFalse(coordinator.engine.isTracked(2))
+        XCTAssertEqual(tiled, 2)
+        XCTAssertFalse(mac.windows[1]!.frame.intersects(mac.windows[3]!.frame))
+    }
+
+    func testARestartPicksUpWindowsThatOpenedMeanwhile() {
+        start(windows: 1)
+        mac.advance(1.5)
+        coordinator.stop()
+        mac.open(2)
+        coordinator = WindowCoordinator(config: Config(), system: mac)
+        coordinator.start()
+        XCTAssertEqual(tiled, 2)
+    }
+
+    func testAWindowMinimizedOverARestartReturnsToItsWorkspace() {
+        start(windows: 2)
+        coordinator.run("move-to-workspace-3")
+        coordinator.run("workspace-1")
+        mac.advance(1.5)
+        mac.windows[2]!.onScreen = false
+        restartTilefy()
+        XCTAssertFalse(coordinator.engine.isTracked(2))
+        mac.windows[2]!.onScreen = true
+        coordinator.scheduleReconcile(full: false)
+        mac.advance(0.1)
+        XCTAssertEqual(coordinator.engine.workspace(containing: 2)?.id, 3)
+    }
+
+    func testAReusedWindowIDIsntMistakenForTheOldWindow() {
+        mac = SimulatedMac()
+        mac.open(1, pid: 100, bundleID: "com.example.old")
+        coordinator = WindowCoordinator(config: Config(), system: mac)
+        coordinator.start()
+        coordinator.run("move-to-workspace-3")
+        coordinator.run("workspace-1")
+        mac.advance(1.5)
+        coordinator.stop()
+        mac.windows[1]!.bundleID = "com.example.new"
+        coordinator = WindowCoordinator(config: Config(), system: mac)
+        coordinator.start()
+        XCTAssertEqual(coordinator.engine.workspace(containing: 1)?.id, 1, "treated as a new window")
+    }
+
+    func testAfterARebootAppsGoBackToTheirWorkspaces() {
+        mac = SimulatedMac()
+        mac.open(1, pid: 100, bundleID: "com.example.mail")
+        mac.windows[1]!.title = "Inbox"
+        mac.open(2, pid: 200, bundleID: "com.example.browser")
+        coordinator = WindowCoordinator(config: Config(), system: mac)
+        coordinator.start()
+        coordinator.run("focus-left")
+        coordinator.run("move-to-workspace-4")
+        coordinator.run("layout-grid")
+        mac.advance(1.5)
+        coordinator.stop()
+
+        // New boot: new IDs, and new processes.
+        let state = mac.savedState
+        mac = SimulatedMac()
+        mac.savedState = state
+        mac.session = "boot-2"
+        mac.open(50, pid: 300, focus: false, bundleID: "com.example.browser")
+        coordinator = WindowCoordinator(config: Config(), system: mac)
+        coordinator.start()
+        XCTAssertEqual(coordinator.engine.workspaces[4]?.layout, .grid, "layouts are restored")
+
+        mac.open(51, pid: 301, bundleID: "com.example.mail")
+        mac.windows[51]!.title = "Inbox"
+        settle()
+        XCTAssertEqual(coordinator.engine.workspace(containing: 51)?.id, 4)
+    }
+
+    func testPlacementsFromBeforeARebootExpire() {
+        mac = SimulatedMac()
+        mac.open(1, pid: 100, bundleID: "com.example.mail")
+        coordinator = WindowCoordinator(config: Config(), system: mac)
+        coordinator.start()
+        coordinator.run("move-to-workspace-4")
+        coordinator.run("workspace-1")
+        mac.advance(1.5)
+        coordinator.stop()
+
+        let state = mac.savedState
+        mac = SimulatedMac()
+        mac.savedState = state
+        mac.session = "boot-2"
+        coordinator = WindowCoordinator(config: Config(), system: mac)
+        coordinator.start()
+        mac.advance(WindowCoordinator.placementWindow + 1)
+        mac.open(51, pid: 301, bundleID: "com.example.mail")
+        settle()
+        XCTAssertNotEqual(coordinator.engine.workspace(containing: 51)?.id, 4, "by now it's just a new window")
+    }
+
+    func testACorruptSaveIsIgnored() {
+        mac = SimulatedMac()
+        mac.savedState = Data("not json".utf8)
+        mac.open(1)
+        coordinator = WindowCoordinator(config: Config(), system: mac)
+        coordinator.start()
+        XCTAssertEqual(tiled, 1)
+    }
+
+    func testStateIsSavedSoonAfterAChange() {
+        start(windows: 1)
+        mac.savedState = nil
+        coordinator.run("layout-grid")
+        XCTAssertNil(mac.savedState, "not on every change")
+        mac.advance(1.5)
+        XCTAssertNotNil(mac.savedState)
+    }
+
+    // MARK: - Animations
+
+    func testCommandsAnimateByDefault() {
+        start(windows: 2)
+        coordinator.run("layout-grid")
+        XCTAssertEqual(mac.lastAnimationDuration, Config().animationDuration)
+    }
+
+    func testAnimationsCanBeTurnedOff() {
+        var config = Config()
+        config.animations = false
+        start(windows: 2, config: config)
+        coordinator.run("layout-grid")
+        XCTAssertEqual(mac.lastAnimationDuration, 0)
+    }
+
+    func testFirstLaunchAndCorrectionsDontAnimate() {
+        start(windows: 2)
+        XCTAssertEqual(mac.lastAnimationDuration, 0)
+        mac.advance(0.5)
+        coordinator.run("layout-grid")
+        mac.windows[1]!.frame.size.height += 16
+        heartbeat()
+        XCTAssertEqual(mac.lastAnimationDuration, 0)
+    }
+
+    // MARK: - Groups and sticky, through the coordinator
+
+    func testGroupsAndStickyTintTheBorder() {
+        start(windows: 2)
+        XCTAssertEqual(mac.borderStyle, .normal)
+        coordinator.run("toggle-group")
+        XCTAssertEqual(mac.borderStyle, .grouped)
+        coordinator.run("toggle-group")
+        coordinator.run("toggle-sticky")
+        XCTAssertEqual(mac.borderStyle, .sticky)
+    }
+
+    func testHUDSaysWhichGroupMemberIsShowing() {
+        start(windows: 1)
+        coordinator.run("toggle-group")
+        mac.open(2)
+        settle()
+        coordinator.run("group-next")
+        XCTAssertEqual(mac.hud.last, "Group  ·  1 of 2")
+        coordinator.run("toggle-group")
+        XCTAssertEqual(mac.hud.last, "Not grouped")
+    }
+
+    // MARK: - Trackpad swipes
+
+    private func swipe(fingers: Int, from: CGFloat, to: CGFloat) {
+        for step in 0...10 {
+            let x = from + (to - from) * CGFloat(step) / 10
+            coordinator.trackpadTouches((0..<fingers).map { CGPoint(x: x + CGFloat($0) * 0.05, y: 0.5) })
+        }
+        coordinator.trackpadTouches([])
+    }
+
+    func testSwipesMoveAlongTheRowInTheScrollingLayout() {
+        var config = Config()
+        config.defaultLayout = .scrolling
+        start(windows: 3, config: config)
+        XCTAssertEqual(coordinator.engine.focusedWindow, 3)
+        swipe(fingers: 4, from: 0.3, to: 0.45)  // Fingers right: the row follows them, showing what's left.
+        XCTAssertEqual(coordinator.engine.focusedWindow, 2)
+        swipe(fingers: 4, from: 0.45, to: 0.3)
+        XCTAssertEqual(coordinator.engine.focusedWindow, 3)
+    }
+
+    func testSwipesChangeWorkspaceInOtherLayouts() {
+        start(windows: 1)
+        coordinator.run("workspace-5")
+        mac.open(2)
+        settle()
+        swipe(fingers: 4, from: 0.3, to: 0.45)
+        XCTAssertEqual(coordinator.engine.activeWorkspace?.id, 1)
+    }
+
+    func testOnlyTheChosenFingerCountSwipes() {
+        var config = Config()
+        config.defaultLayout = .scrolling
+        start(windows: 3, config: config)
+        swipe(fingers: 3, from: 0.3, to: 0.8)
+        XCTAssertEqual(coordinator.engine.focusedWindow, 3)
+        config.swipeFingers = 3
+        coordinator.update(config: config)
+        swipe(fingers: 3, from: 0.3, to: 0.45)
+        XCTAssertEqual(coordinator.engine.focusedWindow, 2)
+    }
+
+    func testSwipesCanBeTurnedOff() {
+        var config = Config()
+        config.defaultLayout = .scrolling
+        config.trackpadSwipes = false
+        start(windows: 3, config: config)
+        swipe(fingers: 4, from: 0.3, to: 0.8)
+        XCTAssertEqual(coordinator.engine.focusedWindow, 3)
+    }
+}
+
+final class MotionTests: XCTestCase {
+    private let monitor = Monitor(
+        id: 1,
+        frame: CGRect(x: 0, y: 0, width: 1000, height: 800),
+        visibleFrame: CGRect(x: 0, y: 25, width: 1000, height: 775)
+    )
+
+    func testInterpolationEndsExactlyOnTarget() {
+        let from = CGRect(x: 0, y: 0, width: 100, height: 100)
+        let to = CGRect(x: 500, y: 300, width: 200, height: 50)
+        XCTAssertEqual(FrameAnimation.interpolate(from: from, to: to, progress: 0), from)
+        XCTAssertEqual(FrameAnimation.interpolate(from: from, to: to, progress: 1), to)
+        XCTAssertEqual(FrameAnimation.interpolate(from: from, to: to, progress: 2), to, "never overshoots")
+    }
+
+    func testEasingStartsFastAndNeverGoesBackward() {
+        XCTAssertGreaterThan(FrameAnimation.eased(0.5), 0.5)
+        var last = 0.0
+        for step in 1...20 {
+            let value = FrameAnimation.eased(Double(step) / 20)
+            XCTAssertGreaterThanOrEqual(value, last)
+            last = value
+        }
+    }
+
+    func testOnlyOnScreenMovesAnimate() {
+        let onScreen = CGRect(x: 100, y: 100, width: 300, height: 300)
+        let elsewhere = CGRect(x: 500, y: 100, width: 300, height: 300)
+        let parked = CGRect(x: 999, y: 799, width: 300, height: 300)
+        XCTAssertTrue(FrameAnimation.isWorthAnimating(from: onScreen, to: elsewhere, monitors: [monitor]))
+        XCTAssertFalse(FrameAnimation.isWorthAnimating(from: parked, to: onScreen, monitors: [monitor]), "coming back from a corner")
+        XCTAssertFalse(FrameAnimation.isWorthAnimating(from: onScreen, to: parked, monitors: [monitor]))
+        XCTAssertFalse(FrameAnimation.isWorthAnimating(from: onScreen, to: onScreen, monitors: [monitor]))
+    }
+}
+
+final class SwipeRecognizerTests: XCTestCase {
+    private func fingers(_ count: Int, x: CGFloat, y: CGFloat = 0.5) -> [CGPoint] {
+        (0..<count).map { CGPoint(x: x + CGFloat($0) * 0.05, y: y) }
+    }
+
+    func testAHorizontalSwipeIsRecognized() {
+        var swipes = SwipeRecognizer(fingers: 4)
+        XCTAssertNil(swipes.update(touches: fingers(4, x: 0.5)))
+        XCTAssertNil(swipes.update(touches: fingers(4, x: 0.45)))
+        XCTAssertEqual(swipes.update(touches: fingers(4, x: 0.39)), .fingersLeft)
+    }
+
+    func testALongSwipeGivesSeveralSteps() {
+        var swipes = SwipeRecognizer(fingers: 4)
+        _ = swipes.update(touches: fingers(4, x: 0.1))
+        XCTAssertEqual(swipes.update(touches: fingers(4, x: 0.25)), .fingersRight)
+        XCTAssertEqual(swipes.update(touches: fingers(4, x: 0.4)), .fingersRight)
+        XCTAssertNil(swipes.update(touches: fingers(4, x: 0.45)))
+    }
+
+    func testTheWrongNumberOfFingersDoesNothing() {
+        var swipes = SwipeRecognizer(fingers: 4)
+        _ = swipes.update(touches: fingers(3, x: 0.1))
+        XCTAssertNil(swipes.update(touches: fingers(3, x: 0.9)))
+        _ = swipes.update(touches: fingers(2, x: 0.1))
+        XCTAssertNil(swipes.update(touches: fingers(2, x: 0.9)))
+    }
+
+    func testAFingerLiftingRestartsTheCount() {
+        var swipes = SwipeRecognizer(fingers: 4)
+        _ = swipes.update(touches: fingers(4, x: 0.1))
+        XCTAssertNil(swipes.update(touches: fingers(3, x: 0.2)))
+        XCTAssertNil(swipes.update(touches: fingers(4, x: 0.5)), "a new starting point, so no jump")
+        XCTAssertEqual(swipes.update(touches: fingers(4, x: 0.65)), .fingersRight)
+    }
+
+    func testAVerticalSwipeIsLeftForMissionControl() {
+        var swipes = SwipeRecognizer(fingers: 4)
+        _ = swipes.update(touches: fingers(4, x: 0.5, y: 0.2))
+        XCTAssertNil(swipes.update(touches: fingers(4, x: 0.5, y: 0.5)))
+        XCTAssertNil(swipes.update(touches: fingers(4, x: 0.9, y: 0.5)), "ignored until the fingers lift")
+        XCTAssertNil(swipes.update(touches: []))
+        _ = swipes.update(touches: fingers(4, x: 0.1))
+        XCTAssertEqual(swipes.update(touches: fingers(4, x: 0.3)), .fingersRight)
+    }
 }
