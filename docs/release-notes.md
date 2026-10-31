@@ -9,11 +9,6 @@
 
 This build is signed ad-hoc, so after updating you'll need to turn Accessibility off and on again for Tilefy. Building from source with your own Apple Development certificate avoids that. See the [README](https://github.com/sammathew4444/tilefy#install).
 
-## What's new in 0.3
+## What's new in 0.3.1
 
-- **Window groups:** several windows share one tile.
-- **Sticky windows:** a floating window that stays with you across workspaces.
-- **Remembers your layout:** workspaces, layouts and floats survive restarts and crashes of Tilefy exactly, and each app's windows return to their workspaces after a reboot.
-- **Animations:** windows slide to their new places, unless Reduce Motion is on or an app can't keep up.
-- **Trackpad swipes:** three or four fingers, moving along the row or between workspaces.
-- **Steadier windows:** windows that drift out of place are put back, within limits, and brief glitches in macOS's window list no longer upset focus.
+- **The focus outline now matches window corners:** it follows each window's real corner radius and curve, instead of a fixed 12pt that left a gap at the corners. For an app that draws its own corners, set `focusBorderRadius` in the config file.

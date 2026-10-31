@@ -187,10 +187,20 @@ final class SimulatedMac: WindowSystem {
     }
 
     private(set) var borderStyle: BorderStyle = .normal
-    func showBorder(around frame: CGRect?, width: Double, style: BorderStyle) {
+    private(set) var borderWindow: WindowID?
+    private(set) var borderRadiusOverride: Double?
+    func showBorder(around frame: CGRect, of window: WindowID, width: Double, cornerRadius: Double?, style: BorderStyle) {
         border = frame
+        borderWindow = window
+        borderRadiusOverride = cornerRadius
         borderStyle = style
     }
+
+    func hideBorder() {
+        border = nil
+        borderWindow = nil
+    }
+
     func showHUD(_ text: String, on monitor: Monitor) { hud.append(text) }
 
     var isMouseDown: Bool { mouseDown }

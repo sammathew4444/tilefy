@@ -8,13 +8,17 @@ final class FocusBorder {
         let panel = makeOverlayPanel()
         let view = NSView()
         view.wantsLayer = true
-        view.layer?.cornerRadius = 12
+        // The curve macOS uses for window corners, rather than a plain circular arc.
+        view.layer?.cornerCurve = .continuous
         panel.contentView = view
         return panel
     }()
 
-    func show(around frame: CGRect, width: Double, style: BorderStyle) {
+    func show(around frame: CGRect, cornerRadius: CGFloat, width: Double, style: BorderStyle) {
         let inset = CGFloat(width)
+        // The outline sits just outside the window. For its inner edge to follow the window's corner, its
+        // outer edge needs a radius larger by the outline's width.
+        panel.contentView?.layer?.cornerRadius = cornerRadius + inset
         let rect = Displays.appKitRect(frame).insetBy(dx: -inset, dy: -inset)
         // Windows in a group are stacked, and a sticky one stays put, so both look a little different.
         let color: NSColor

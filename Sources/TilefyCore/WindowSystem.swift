@@ -51,7 +51,9 @@ public protocol WindowSystem: AnyObject {
     /// Takes keyboard focus away from all windows.
     func clearFocus()
 
-    func showBorder(around frame: CGRect?, width: Double, style: BorderStyle)
+    /// Outlines a window. `cornerRadius` overrides the window's own radius, which is used if it's nil.
+    func showBorder(around frame: CGRect, of window: WindowID, width: Double, cornerRadius: Double?, style: BorderStyle)
+    func hideBorder()
     func showHUD(_ text: String, on monitor: Monitor)
 
     func loadState() -> Data?
