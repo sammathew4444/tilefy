@@ -121,7 +121,7 @@ public final class WindowCoordinator {
         guard isStarted else { return }
         saveNow()
         restoreParkedWindows()
-        system.showBorder(around: nil, width: 0, style: .normal)
+        system.hideBorder()
         isStarted = false
     }
 
@@ -130,7 +130,7 @@ public final class WindowCoordinator {
         isPaused = paused
         if paused {
             restoreParkedWindows()
-            system.showBorder(around: nil, width: 0, style: .normal)
+            system.hideBorder()
         } else {
             engine.setMonitors(system.currentMonitors())
             reconcile(full: true)
@@ -414,12 +414,12 @@ public final class WindowCoordinator {
         case .tilefy:
             // Whatever gets focus next counts as a change, even the window that had it before.
             lastSystemFocus = nil
-            system.showBorder(around: nil, width: 0, style: .normal)
+            system.hideBorder()
             return false
         case let .app(_, focused?) where engine.isTracked(focused):
             id = focused
         case .app, .unknown:
-            system.showBorder(around: nil, width: 0, style: .normal)
+            system.hideBorder()
             return false
         }
 
@@ -462,7 +462,7 @@ public final class WindowCoordinator {
               let focused = engine.focusedWindow, lastPlan.hidden[focused] == nil,
               let pid = owners[focused], let frame = system.frame(of: focused)
         else {
-            system.showBorder(around: nil, width: 0, style: .normal)
+            system.hideBorder()
             return
         }
         // Another app may be frontmost with no tracked window, like a panel. Don't draw over it.
@@ -470,11 +470,11 @@ public final class WindowCoordinator {
         if case let .app(frontPID, _) = system.frontmost(), frontPID == pid { isFront = true }
         let isExpected = requestedFocus.map { $0.window == focused && system.now < $0.until } ?? false
         guard isFront || isExpected else {
-            system.showBorder(around: nil, width: 0, style: .normal)
+            system.hideBorder()
             return
         }
         let style: BorderStyle = engine.isSticky(focused) ? .sticky : (engine.groupPosition(of: focused) != nil ? .grouped : .normal)
-        system.showBorder(around: frame, width: config.focusBorderWidth, style: style)
+        system.showBorder(around: frame, of: focused, width: config.focusBorderWidth, cornerRadius: config.focusBorderRadius, style: style)
     }
 
     // MARK: - Applying plans
@@ -610,7 +610,7 @@ public final class WindowCoordinator {
         }
         guard draggedWindow == nil else { return }
         draggedWindow = id
-        system.showBorder(around: nil, width: 0, style: .normal)
+        system.hideBorder()
         pollForMouseUp()
     }
 

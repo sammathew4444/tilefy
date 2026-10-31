@@ -125,7 +125,9 @@ Window groups, where several windows share one tile and one shows at a time:
 | `⌃⌥⌘G` | Take this window out of its group |
 | `` ⌃⌥` `` / `` ⌃⌥⇧` `` | Next / previous window in the group |
 
-The focused window's outline is purple in a group, and orange when sticky.
+The focused window's outline is purple in a group, and orange when sticky. It follows each window's own
+corner radius. For an app that draws its own corners, set a fixed one with `focusBorderRadius` in the
+config file.
 
 With the mouse and trackpad:
 
@@ -217,8 +219,8 @@ log show --last 10m --predicate 'subsystem == "app.tilefy"'
 
 - Window groups have no tab bar. Which member is showing appears briefly on screen when it changes.
 - A swipe can't be taken away from macOS, so if macOS uses the same number of fingers, both react.
-- Tilefy uses one private API, `_AXUIElementGetWindow`, as most Mac window managers do. That rules out
-  the Mac App Store.
+- Tilefy uses private APIs: `_AXUIElementGetWindow`, as most Mac window managers do, and SkyLight's
+  corner radius lookup for the outline. That rules out the Mac App Store.
 - Downloads aren't notarized.
 
 ## Acknowledgements

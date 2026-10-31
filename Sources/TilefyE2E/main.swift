@@ -606,6 +606,72 @@ if let window = status()?.focusedWindow {
     check("and it can rejoin the others", waitUntil { status()?.workspace == 1 && isTiled(count: 3) }, describe())
 }
 
+section("Focus outline")
+/// Walks in from each corner of `frame` along the diagonal, in a screenshot, and counts the corners
+/// where background shows through between the outline and the window. Needs a window with nothing
+/// but dark desktop behind it. Returns nil if a screenshot isn't possible.
+func cornersWithAGap(around frame: CGRect) -> Int? {
+    let path = NSTemporaryDirectory() + "tilefy-e2e-corners.png"
+    capture("/usr/sbin/screencapture", ["-x", path])
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    guard let image = NSBitmapImageRep(data: (try? Data(contentsOf: URL(fileURLWithPath: path))) ?? Data()),
+          let screen = NSScreen.screens.first
+    else { return nil }
+    let scale = CGFloat(image.pixelsWide) / screen.frame.width
+
+    func isBackground(_ x: CGFloat, _ y: CGFloat) -> Bool {
+        guard let color = image.colorAt(x: Int(x * scale), y: Int(y * scale))?.usingColorSpace(.deviceRGB) else { return true }
+        return color.redComponent + color.greenComponent + color.blueComponent < 0.25
+    }
+
+    let corners: [(CGPoint, CGFloat, CGFloat)] = [
+        (CGPoint(x: frame.minX, y: frame.minY), 1, 1),
+        (CGPoint(x: frame.maxX, y: frame.minY), -1, 1),
+        (CGPoint(x: frame.minX, y: frame.maxY), 1, -1),
+        (CGPoint(x: frame.maxX, y: frame.maxY), -1, -1),
+    ]
+    var gaps = 0
+    for (corner, dx, dy) in corners {
+        var seenOutline = false
+        var gap = false
+        for step in stride(from: CGFloat(-4), through: 30, by: 0.5) {
+            let background = isBackground(corner.x + dx * step, corner.y + dy * step)
+            if !background {
+                seenOutline = true
+            } else if seenOutline {
+                gap = true
+            }
+        }
+        if gap { gaps += 1 }
+    }
+    return gaps
+}
+
+if let window = status()?.focusedWindow {
+    dispatch("move-to-workspace-6")
+    _ = waitUntil { status()?.workspace == 6 }
+    dispatch("toggle-sticky")  // An orange outline, which can't be mistaken for the window.
+    let lifted = settledFrames()[Int(window)] ?? .zero
+    pump(0.5)
+    if let gaps = cornersWithAGap(around: lifted) {
+        check("the outline follows the window's corners", gaps == 0, "background shows at \(gaps) corners of \(lifted)")
+        screenshot("outline-corners")
+
+        // Make sure that check can actually fail: a square outline leaves a gap at every corner.
+        writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle", "focusBorderRadius": 0}"#)
+        dispatch("retile")
+        pump(0.8)
+        let squareGaps = cornersWithAGap(around: lifted) ?? 0
+        check("a fixed square outline visibly doesn't match", squareGaps > 0, "\(squareGaps) corners with a gap")
+        writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle"}"#)
+    } else {
+        print("  skip  no screenshot permission, so the outline's corners can't be checked")
+    }
+    dispatch("toggle-float")
+    dispatch("move-to-workspace-1")
+    _ = waitUntil { status()?.workspace == 1 && isTiled(count: 3) }
+}
+
 section("Scrolling layout")
 dispatch("layout-scrolling")
 for _ in 0..<3 { control("open") }

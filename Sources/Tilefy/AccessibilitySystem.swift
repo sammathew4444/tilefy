@@ -281,13 +281,15 @@ final class AccessibilitySystem: WindowSystem {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func showBorder(around frame: CGRect?, width: Double, style: BorderStyle) {
+    func showBorder(around frame: CGRect, of window: WindowID, width: Double, cornerRadius: Double?, style: BorderStyle) {
         lastBorderFrame = frame
-        if let frame {
-            border.show(around: frame, width: width, style: style)
-        } else {
-            border.hide()
-        }
+        let radius = cornerRadius.map { CGFloat($0) } ?? WindowCorners.radius(of: window)
+        border.show(around: frame, cornerRadius: radius, width: width, style: style)
+    }
+
+    func hideBorder() {
+        lastBorderFrame = nil
+        border.hide()
     }
 
     // MARK: - Saved state

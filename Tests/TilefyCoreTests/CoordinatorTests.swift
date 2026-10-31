@@ -471,6 +471,21 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(mac.border, mac.windows[1]!.frame)
     }
 
+    func testBorderIsForTheFocusedWindowSoItCanMatchItsCorners() {
+        start(windows: 2)
+        XCTAssertEqual(mac.borderWindow, 2)
+        XCTAssertNil(mac.borderRadiusOverride, "uses the window's own radius unless told otherwise")
+        coordinator.run("focus-left")
+        XCTAssertEqual(mac.borderWindow, 1)
+    }
+
+    func testBorderRadiusCanBeFixedInConfig() {
+        var config = Config()
+        config.focusBorderRadius = 6
+        start(windows: 1, config: config)
+        XCTAssertEqual(mac.borderRadiusOverride, 6)
+    }
+
     func testFocusBorderCanBeTurnedOff() {
         var config = Config()
         config.focusBorder = false

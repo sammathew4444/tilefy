@@ -14,6 +14,8 @@ public struct Config: Codable, Equatable {
     public var scrollingDefaultWidth: Double = 0.5
     public var focusBorder: Bool = true
     public var focusBorderWidth: Double = 2
+    /// Fixed corner radius for the outline. Normally unset, so that it matches each window's own.
+    public var focusBorderRadius: Double?
     /// Bundle IDs of apps whose windows always float.
     public var floatApps: [String] = ["com.apple.systempreferences", "com.apple.calculator"]
     /// Overrides on top of the default bindings, e.g. {"mod+y": "layout-grid", "mod+w": "none"}.
@@ -46,6 +48,7 @@ public struct Config: Codable, Equatable {
         scrollingDefaultWidth = try c.decodeIfPresent(Double.self, forKey: .scrollingDefaultWidth) ?? d.scrollingDefaultWidth
         focusBorder = try c.decodeIfPresent(Bool.self, forKey: .focusBorder) ?? d.focusBorder
         focusBorderWidth = try c.decodeIfPresent(Double.self, forKey: .focusBorderWidth) ?? d.focusBorderWidth
+        focusBorderRadius = try c.decodeIfPresent(Double.self, forKey: .focusBorderRadius)
         floatApps = try c.decodeIfPresent([String].self, forKey: .floatApps) ?? d.floatApps
         bindings = try c.decodeIfPresent([String: String].self, forKey: .bindings) ?? d.bindings
         appWorkspaces = try c.decodeIfPresent([String: Int].self, forKey: .appWorkspaces) ?? d.appWorkspaces
