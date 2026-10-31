@@ -746,7 +746,6 @@ if AXIsProcessTrusted() {
 
     // The shortcut recorder in Settings: click a shortcut, press new keys, check it took effect.
     dispatch("open-settings-shortcuts")
-    pump(1.2)
     func tilefyWindow() -> CGRect? {
         let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[CFString: Any]] ?? []
         for info in list where info[kCGWindowOwnerName] as? String == "Tilefy" && info[kCGWindowLayer] as? Int == 0 {
@@ -754,6 +753,9 @@ if AXIsProcessTrusted() {
         }
         return nil
     }
+    // It can take a while to appear on a busy machine, and then a moment to finish laying out.
+    _ = waitUntil(timeout: 10) { tilefyWindow() != nil }
+    pump(1)
     let settings = tilefyWindow()
     let screenFrame = NSScreen.screens[0].frame
     check("the Settings window is centered and fits on screen", settings.map {
@@ -825,7 +827,9 @@ if testLoginItem {
         return dump.components(separatedBy: "uuid:").contains { $0.contains("app.tilefy") && $0.contains("[enabled") }
     }
     dispatch("open-settings-general")
-    pump(1.2)
+    pump(0.5)
+    _ = waitUntil(timeout: 10) { tilefySettingsWindow() != nil }
+    pump(1)
 
     // In a grouped form the switch has no name of its own, and comes right after its label.
     var controls: [(role: String, name: String, element: AXUIElement)] = []
