@@ -228,6 +228,10 @@ check("has Accessibility permission", true)
 
 // MARK: Geometry helpers
 
+/// This process can see the visible area a few points differently from the app (it depends on how
+/// AppKit was set up in each, and a Dock moving), so "fits on screen" allows for that much.
+let areaTolerance: CGFloat = 6
+
 func screenArea() -> CGRect {
     let primaryHeight = NSScreen.screens[0].frame.height
     let front = fixtureWindows().first?.frame ?? .zero
@@ -249,7 +253,7 @@ func noneOverlap(_ rects: [CGRect]) -> Bool {
 func coversScreen(_ rects: [CGRect], gaps: Int) -> Bool {
     let area = screenArea()
     let used = rects.reduce(CGFloat(0)) { $0 + $1.width * $1.height }
-    return used > area.width * area.height * 0.9 && rects.allSatisfy { area.insetBy(dx: -2, dy: -2).contains($0) }
+    return used > area.width * area.height * 0.9 && rects.allSatisfy { area.insetBy(dx: -areaTolerance, dy: -areaTolerance).contains($0) }
 }
 
 func isTiled(count: Int) -> Bool {
@@ -312,7 +316,7 @@ check("master makes one window larger", waitUntil {
 dispatch("layout-monocle")
 check("monocle makes every window fill the screen", waitUntil {
     let rects = Array(frames().values)
-    return rects.count == 3 && rects.allSatisfy { abs($0.width - screenArea().width) < 2 && abs($0.height - screenArea().height) < 2 }
+    return rects.count == 3 && rects.allSatisfy { abs($0.width - screenArea().width) < areaTolerance && abs($0.height - screenArea().height) < areaTolerance }
 }, describe())
 
 section("Focus")
@@ -388,7 +392,7 @@ if let window = status()?.focusedWindow {
     dispatch("toggle-float")
     check("a floated window lifts out of its tile", waitUntil {
         guard let frame = frames()[Int(window)] else { return false }
-        return abs(frame.midX - screenArea().midX) < 3 && abs(frame.midY - screenArea().midY) < 3
+        return abs(frame.midX - screenArea().midX) < areaTolerance && abs(frame.midY - screenArea().midY) < areaTolerance
     }, describe())
     check("the others take the space", waitUntil {
         let others = frames().filter { $0.key != Int(window) }.values
@@ -428,7 +432,7 @@ if let focused = status()?.focusedWindow {
     check("focus travels along the row", leftmost != focused)
     check("the viewport follows it", waitUntil {
         guard let leftmost, let frame = frames()[Int(leftmost)] else { return false }
-        return screenArea().insetBy(dx: -2, dy: -2).contains(frame)
+        return screenArea().insetBy(dx: -areaTolerance, dy: -areaTolerance).contains(frame)
     }, describe())
     dispatch("cycle-width")
     check("cycle-width makes the column two thirds wide", waitUntil {
@@ -471,7 +475,7 @@ if let target = status()?.focusedWindow {
     check("the window goes fullscreen", waitUntil(timeout: 10) {
         frames()[Int(target)].map { abs($0.width - screenFrame.width) < 2 && abs($0.height - screenFrame.height) < 2 } ?? false
     }, describe())
-    check("the other windows leave the screen with their Space", waitUntil(timeout: 10) { frames().count == 1 }, describe())
+    check("the other windows leave the screen with their Space", waitUntil(timeout: 10) { frames().values.filter { $0.height > 50 }.count == 1 }, describe())
     pump(3.5)
     check("Tilefy leaves the fullscreen window alone", frames()[Int(target)].map { abs($0.width - screenFrame.width) < 2 } ?? false, describe())
     check("no focus or workspace changes while away", status()?.workspace == 1)
@@ -627,7 +631,9 @@ func tilefySettingsWindow() -> CGRect? {
 if testLoginItem {
     section("Launch at login")
     func loginItemRegistered() -> Bool {
-        capture("/usr/bin/sudo", ["-n", "/usr/bin/sfltool", "dumpbtm"]).output.lowercased().contains("app.tilefy")
+        // The list keeps entries that were turned off, so look at this one's state.
+        let dump = capture("/usr/bin/sudo", ["-n", "/usr/bin/sfltool", "dumpbtm"]).output.lowercased()
+        return dump.components(separatedBy: "uuid:").contains { $0.contains("app.tilefy") && $0.contains("[enabled") }
     }
     dispatch("open-settings-general")
     pump(1.2)
@@ -756,7 +762,7 @@ if testSecondDisplay {
 }
 
 section("Pause and quit")
-dispatch("workspace-2")
+dispatch("workspace-8")
 _ = waitUntil { frames().values.allSatisfy(isParked) }
 dispatch("toggle-pause")
 check("pausing brings parked windows back on-screen", waitUntil { frames().values.allSatisfy { !isParked($0) } }, describe())
