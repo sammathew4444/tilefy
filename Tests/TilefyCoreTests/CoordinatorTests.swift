@@ -179,10 +179,12 @@ final class CoordinatorTests: XCTestCase {
 
     func testSwitchingNativeSpaceDoesntMoveOrFocusAnything() {
         start(windows: 2)
+        openUnmanagedWindow()
         let moves = mac.moveCount
         for id: WindowID in [1, 2] { mac.windows[id]!.onScreen = false }
         coordinator.scheduleReconcile(full: true)
         mac.advance(0.1)
+        XCTAssertEqual(tiled, 0)
         XCTAssertEqual(mac.moveCount, moves)
         XCTAssertTrue(mac.focusRequests.isEmpty, "focusing a window on another Space would drag you back to it")
     }
@@ -279,9 +281,16 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.engine.focusedWindow, 1)
     }
 
-    func testFocusSurvivesTheWindowListComingBackEmpty() {
+    /// A window of some other app, that keeps the on-screen list from being empty.
+    private func openUnmanagedWindow() {
+        mac.open(99, pid: 999, focus: false)
+        mac.windows[99]!.isReady = false
+    }
+
+    func testFocusSurvivesAllWindowsGoingAwayAndReturning() {
         // Seen on a real Mac: Tilefy lost focus for good, so shortcuts did nothing until a click.
         start(windows: 2)
+        openUnmanagedWindow()
         XCTAssertEqual(coordinator.engine.focusedWindow, 2)
         for id: WindowID in [1, 2] { mac.windows[id]!.onScreen = false }
         coordinator.scheduleReconcile(full: true)
@@ -294,6 +303,91 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.engine.focusedWindow, 2, "the window macOS says is focused, not just any")
         coordinator.run("focus-left")
         XCTAssertEqual(coordinator.engine.focusedWindow, 1, "shortcuts work again")
+    }
+
+    func testAnEmptyWindowListIsntBelieved() {
+        start(windows: 2)
+        let frames = mac.windows.mapValues(\.frame)
+        let moves = mac.moveCount
+        for id: WindowID in [1, 2] { mac.windows[id]!.onScreen = false }
+        coordinator.scheduleReconcile(full: true)
+        mac.advance(0.1)
+        XCTAssertEqual(coordinator.engine.focusedWindow, 2, "nothing is marked as away")
+        XCTAssertEqual(tiled, 2)
+        XCTAssertEqual(mac.moveCount, moves)
+        for id: WindowID in [1, 2] { mac.windows[id]!.onScreen = true }
+        coordinator.scheduleReconcile(full: true)
+        mac.advance(0.1)
+        XCTAssertEqual(mac.windows.mapValues(\.frame), frames)
+    }
+
+    func testClosingTheLastWindowIsNoticedEvenThoughTheListIsEmpty() {
+        start(windows: 1)
+        mac.close(window: 1)
+        coordinator.windowDestroyed()
+        mac.advance(0.5)
+        XCTAssertFalse(coordinator.engine.isTracked(1))
+    }
+
+    func testAWindowThatDriftsIsPutBack() {
+        start(windows: 2)
+        let slot = mac.windows[1]!.frame
+        mac.windows[1]!.frame.size.height += 16  // What Claude's window did on a real Mac.
+        heartbeat()
+        XCTAssertEqual(mac.windows[1]!.frame, slot)
+    }
+
+    func testASmallDifferenceIsntDrift() {
+        start(windows: 1)
+        mac.advance(0.5)  // Past the check that follows a new window.
+        mac.windows[1]!.frame.origin.y += 1  // Some apps round to their own pixel grid.
+        let applies = mac.applyCount
+        heartbeat()
+        heartbeat()
+        XCTAssertEqual(mac.applyCount, applies)
+    }
+
+    func testAStubbornWindowGetsAFewTriesThenIsLeftAlone() {
+        start(windows: 2)
+        mac.advance(0.5)  // Past the check that follows a new window.
+        mac.windows[1]!.frame.size.height += 100
+        mac.windows[1]!.isStubborn = true
+        let applies = mac.applyCount
+        for _ in 0..<10 { heartbeat() }
+        XCTAssertEqual(mac.applyCount - applies, WindowCoordinator.driftAttemptLimit, "doesn't fight it forever")
+    }
+
+    func testAStubbornWindowGetsNewTriesWhenItsSlotChanges() {
+        start(windows: 2)
+        mac.windows[1]!.frame.size.height += 100
+        mac.windows[1]!.isStubborn = true
+        for _ in 0..<10 { heartbeat() }
+        coordinator.run("layout-master")
+        mac.windows[1]!.isStubborn = false
+        mac.windows[1]!.frame.size.height += 100
+        heartbeat()
+        let wanted = coordinator.engine.plan().frames[1]
+        XCTAssertEqual(mac.windows[1]!.frame, wanted)
+    }
+
+    func testDriftIsntCorrectedWhileTheMouseIsDown() {
+        start(windows: 2)
+        mac.advance(0.5)  // Past the check that follows a new window.
+        let moved = mac.windows[1]!.frame.offsetBy(dx: 40, dy: 0)
+        mac.windows[1]!.frame = moved
+        mac.mouseDown = true
+        heartbeat()
+        XCTAssertEqual(mac.windows[1]!.frame, moved)
+    }
+
+    func testFloatsArentTreatedAsDrifting() {
+        start(windows: 1)
+        mac.open(2, cannotTile: true)
+        settle()
+        let moved = CGRect(x: 300, y: 300, width: 400, height: 300)
+        mac.windows[2]!.frame = moved
+        heartbeat()
+        XCTAssertEqual(mac.windows[2]!.frame, moved)
     }
 
     func testFocusOnAnEmptyDisplayIsntPulledBack() {

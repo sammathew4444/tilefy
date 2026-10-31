@@ -1,4 +1,5 @@
 import AppKit
+import CTilefyE2E
 import TilefyCore
 
 // Real-window tests: drives an actual Tilefy against actual windows and checks where they end up.
@@ -43,6 +44,13 @@ func runFixture(count: Int) -> Never {
         case "restore": window?.deminiaturize(nil)
         case "resize-self":
             if let window { window.setFrame(window.frame.insetBy(dx: 40, dy: 40), display: true) }
+        case "fullscreen":
+            window?.toggleFullScreen(nil)
+        case "refuse-resizes":
+            // An app that won't go below its current size, like a busy or size-limited one.
+            if let window { window.minSize = window.frame.size }
+        case "allow-resizes":
+            window?.minSize = NSSize(width: 100, height: 100)
         case "quit": exit(0)
         default: break
         }
@@ -66,6 +74,13 @@ guard let appArgument = CommandLine.arguments.dropFirst().first else {
 let tilefyBinary = URL(fileURLWithPath: appArgument).appendingPathComponent("Contents/MacOS/Tilefy").path
 let screenshots: String? = CommandLine.arguments.dropFirst(2).first { !$0.hasPrefix("--") }
 let launchWithOpen = CommandLine.arguments.contains("--open")
+// These change the machine (displays, login items), so only CI asks for them.
+let testSecondDisplay = CommandLine.arguments.contains("--second-display")
+let testLoginItem = CommandLine.arguments.contains("--login-item")
+
+// Keeps NSScreen up to date as displays come and go, with no Dock icon or menu bar.
+_ = NSApplication.shared
+NSApp.setActivationPolicy(.prohibited)
 
 var failures: [String] = []
 var passes = 0
@@ -433,6 +448,38 @@ if let target = frames().keys.sorted().first {
     check("snap-back corrects it", waitUntil { frames()[target] == slot }, describe())
 }
 
+section("Apps that refuse a resize")
+if let target = frames().keys.sorted().first {
+    control("refuse-resizes:\(target)")
+    pump(0.2)
+    dispatch("layout-master")
+    pump(1)
+    let refused = frames()[target]
+    print("  note  while refusing, the window is \(String(describing: refused))")
+    check("Tilefy doesn't crash or hang on it", status() != nil)
+    control("allow-resizes:\(target)")
+    check("it's put right once the app allows it", waitUntil(timeout: 8) { isTiled(count: 6) }, describe())
+    dispatch("layout-grid")
+    _ = waitUntil { isTiled(count: 6) }
+}
+
+section("Native fullscreen, which is a real Space switch")
+if let target = status()?.focusedWindow {
+    let before = frames()
+    control("fullscreen:\(target)")
+    let screenFrame = NSScreen.screens[0].frame
+    check("the window goes fullscreen", waitUntil(timeout: 10) {
+        frames()[Int(target)].map { abs($0.width - screenFrame.width) < 2 && abs($0.height - screenFrame.height) < 2 } ?? false
+    }, describe())
+    check("the other windows leave the screen with their Space", waitUntil(timeout: 10) { frames().count == 1 }, describe())
+    pump(3.5)
+    check("Tilefy leaves the fullscreen window alone", frames()[Int(target)].map { abs($0.width - screenFrame.width) < 2 } ?? false, describe())
+    check("no focus or workspace changes while away", status()?.workspace == 1)
+    screenshot("native-fullscreen")
+    control("fullscreen:\(target)")
+    check("leaving fullscreen brings everything back to its slot", waitUntil(timeout: 12) { same(frames(), before) }, describe())
+}
+
 section("Real input (synthesized keyboard and mouse)")
 func postKey(_ keyCode: CGKeyCode, flags: CGEventFlags) {
     let source = CGEventSource(stateID: .hidSystemState)
@@ -559,6 +606,154 @@ for tab in ["general", "layouts", "shortcuts", "apps"] {
     screenshot("settings-\(tab)")
 }
 check("still alive after opening every Settings tab", status() != nil)
+
+func mousePost(_ type: CGEventType, _ point: CGPoint) {
+    let source = CGEventSource(stateID: .hidSystemState)
+    let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left)
+    event?.setIntegerValueField(.mouseEventClickState, value: 1)
+    event?.flags = []
+    event?.post(tap: .cghidEventTap)
+    pump(0.03)
+}
+
+func tilefySettingsWindow() -> CGRect? {
+    let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[CFString: Any]] ?? []
+    for info in list where info[kCGWindowOwnerName] as? String == "Tilefy" && info[kCGWindowLayer] as? Int == 0 {
+        if let bounds = info[kCGWindowBounds] as? NSDictionary, let frame = CGRect(dictionaryRepresentation: bounds) { return frame }
+    }
+    return nil
+}
+
+if testLoginItem {
+    section("Launch at login")
+    func loginItemRegistered() -> Bool {
+        capture("/usr/bin/sudo", ["-n", "/usr/bin/sfltool", "dumpbtm"]).output.lowercased().contains("app.tilefy")
+    }
+    dispatch("open-settings-general")
+    pump(1.2)
+    if let window = tilefySettingsWindow() {
+        let checkbox = CGPoint(x: window.minX + 177, y: window.minY + 133)
+        func clickCheckbox() {
+            mousePost(.mouseMoved, checkbox)
+            pump(0.2)
+            mousePost(.leftMouseDown, checkbox)
+            pump(0.1)
+            mousePost(.leftMouseUp, checkbox)
+            pump(1.5)
+        }
+        check("not registered at first", !loginItemRegistered())
+        clickCheckbox()
+        screenshot("login-item-on")
+        check("turning it on registers a login item", waitUntil { loginItemRegistered() })
+        clickCheckbox()
+        screenshot("login-item-off")
+        check("turning it off removes it", waitUntil { !loginItemRegistered() })
+    } else {
+        check("the Settings window opened", false)
+    }
+}
+
+if testSecondDisplay {
+    section("Two displays (a virtual second display)")
+    func displays() -> [CGRect] {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 8)
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(8, &ids, &count)
+        return ids.prefix(Int(count)).map(CGDisplayBounds)
+    }
+    dispatch("workspace-1")
+    dispatch("layout-grid")
+    _ = waitUntil { status()?.workspace == 1 && isTiled(count: 6) }
+    let virtualDisplay = TilefyCreateVirtualDisplay(1280, 800)
+    pump(0.5)
+    if virtualDisplay != nil, waitUntil(timeout: 10, { displays().count == 2 }) {
+        let main = displays()[0]
+        let second = displays()[1]
+        print("  note  displays: \(main) and \(second)")
+        pump(2)
+        func isOn(_ display: CGRect, _ frame: CGRect) -> Bool {
+            display.insetBy(dx: -2, dy: -2).contains(frame)
+        }
+        check("the windows stay tiled on the first display", waitUntil { frames().values.allSatisfy { isOn(main, $0) } }, describe())
+
+        guard let moving = status()?.focusedWindow else { fatalError("no focused window") }
+        dispatch("move-to-monitor-next")
+        check("move-to-monitor-next carries the window across", waitUntil { frames()[Int(moving)].map { isOn(second, $0) } ?? false }, describe())
+        check("it fills the second display", waitUntil {
+            frames()[Int(moving)].map { $0.width > second.width - 20 && $0.height > second.height * 0.8 } ?? false
+        }, describe())
+        check("focus followed it", status()?.focusedWindow == moving)
+        pump(0.3)
+        screenshot("two-displays")
+        let firstWorkspace = status()?.windows.first { $0.key != String(moving) }?.value
+        let secondWorkspace = status()?.workspace
+        check("each display has its own workspace", firstWorkspace != nil && firstWorkspace != secondWorkspace, "\(String(describing: firstWorkspace)) and \(String(describing: secondWorkspace))")
+        check("the first display fills the gap", waitUntil {
+            let rest = frames().filter { $0.key != Int(moving) }.values
+            return rest.count == 5 && noneOverlap(Array(rest)) && rest.allSatisfy { isOn(main, $0) }
+        }, describe())
+
+        // Parking must not put windows on the neighbouring display.
+        dispatch("workspace-7")
+        check("a parked window doesn't land on the other display", waitUntil {
+            guard let frame = frames()[Int(moving)] else { return false }
+            return isParked(frame)
+        }, describe())
+        if let firstWorkspace { dispatch("workspace-\(firstWorkspace)") }
+        if let secondWorkspace { dispatch("workspace-\(secondWorkspace)") }
+        check("switching back brings it to the second display", waitUntil { frames()[Int(moving)].map { isOn(second, $0) } ?? false }, describe())
+
+        // The scrolling layout next to another display.
+        if let firstWorkspace { dispatch("workspace-\(firstWorkspace)") }
+        dispatch("layout-scrolling")
+        _ = waitUntil { status()?.layout == "scrolling" }
+        pump(1)
+        check("scrolled columns don't spill onto the other display", waitUntil {
+            frames().filter { $0.key != Int(moving) }.values.allSatisfy { !$0.intersects(second) || isParked($0) }
+        }, describe())
+        screenshot("two-displays-scrolling")
+        dispatch("layout-grid")
+        _ = waitUntil { status()?.layout == "grid" }
+
+        // Dragging across displays.
+        if let window = frames().first(where: { $0.key != Int(moving) && isOn(main, $0.value) }) {
+            pump(0.5)
+            let start = CGPoint(x: window.value.midX, y: window.value.minY + 14)
+            let end = CGPoint(x: second.midX, y: second.midY)
+            mousePost(.mouseMoved, start)
+            pump(0.3)
+            mousePost(.leftMouseDown, start)
+            pump(0.3)
+            for step in 1...30 {
+                let t = CGFloat(step) / 30
+                mousePost(.leftMouseDragged, CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t))
+            }
+            pump(0.3)
+            mousePost(.leftMouseUp, end)
+            check("dragging a window to the other display moves it there", waitUntil { frames()[window.key].map { isOn(second, $0) } ?? false }, describe())
+            check("and the two share the display", waitUntil {
+                guard let a = frames()[window.key], let b = frames()[Int(moving)] else { return false }
+                return isOn(second, a) && isOn(second, b) && noneOverlap([a, b])
+            }, describe())
+        }
+
+        // Unplugging.
+        TilefyDestroyVirtualDisplay(virtualDisplay)
+        check("the display is gone", waitUntil(timeout: 10) { displays().count == 1 })
+        pump(2)
+        check("Tilefy survives the unplug", status() != nil)
+        if let secondWorkspace {
+            dispatch("workspace-\(secondWorkspace)")
+            check("its windows are reachable on the remaining display", waitUntil {
+                frames()[Int(moving)].map { isOn(main, $0) } ?? false
+            }, describe())
+        }
+        dispatch("workspace-1")
+        _ = waitUntil { status()?.workspace == 1 }
+    } else {
+        print("  skip  this machine won't create a virtual display")
+    }
+}
 
 section("Pause and quit")
 dispatch("workspace-2")

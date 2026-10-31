@@ -14,6 +14,8 @@ final class SimulatedMac: WindowSystem {
         var cannotTile = false
         var bundleID: String?
         var isReady = true
+        /// Ignores every attempt to move or resize it.
+        var isStubborn = false
     }
 
     var windows: [WindowID: Window] = [:]
@@ -128,8 +130,11 @@ final class SimulatedMac: WindowSystem {
 
     func forget(_ id: WindowID) {}
 
+    private(set) var applyCount = 0
+
     func carryOut(plan: LayoutPlan, skipping: WindowID?, focus: WindowID?, monitors: [Monitor], completion: @escaping () -> Void) {
-        for (id, frame) in plan.frames where id != skipping {
+        applyCount += 1
+        for (id, frame) in plan.frames where id != skipping && windows[id]?.isStubborn != true {
             if windows[id]?.frame != frame { moveCount += 1 }
             windows[id]?.frame = frame
         }

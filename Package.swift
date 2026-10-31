@@ -14,6 +14,7 @@ let package = Package(
         .executableTarget(name: "Tilefy", dependencies: ["TilefyCore"]),
         .testTarget(name: "TilefyCoreTests", dependencies: ["TilefyCore"]),
         // Real-window tests. See scripts/e2e.sh. Only ever touches windows it opened itself.
-        .executableTarget(name: "TilefyE2E", dependencies: ["TilefyCore"]),
+        .executableTarget(name: "TilefyE2E", dependencies: ["TilefyCore", "CTilefyE2E"]),
+        .target(name: "CTilefyE2E"),
     ]
 )
