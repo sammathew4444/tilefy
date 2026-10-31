@@ -337,6 +337,13 @@ check("monocle makes every window fill the screen", waitUntil {
 }, describe())
 
 section("Animations")
+func dispatchWithoutWaiting(_ command: String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: tilefyBinary)
+    process.arguments = ["dispatch", command]
+    try? process.run()
+}
+
 func writeConfig(_ json: String) {
     try? Data(json.utf8).write(to: URL(fileURLWithPath: configPath))
     dispatch("reload-config")
@@ -355,17 +362,19 @@ func distinctFramesDuring(_ seconds: TimeInterval, after action: () -> Void) -> 
     return seen.count
 }
 
+// Slower than normal, to be sure of catching it from another process.
+writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle", "animationDuration": 0.5}"#)
 dispatch("layout-master")
 _ = waitUntil { isTiled(count: 3) }
-pump(0.5)
-let animatedFrames = distinctFramesDuring(0.6) { dispatch("layout-dwindle") }
+pump(1)
+let animatedFrames = distinctFramesDuring(1) { dispatchWithoutWaiting("layout-dwindle") }
 check("windows pass through in-between positions", animatedFrames > 8, "only \(animatedFrames) distinct frames")
 check("and end up exactly tiled", waitUntil { isTiled(count: 3) }, describe())
 writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle", "animations": false}"#)
 dispatch("layout-master")
 _ = waitUntil { isTiled(count: 3) }
 pump(0.5)
-let instantFrames = distinctFramesDuring(0.6) { dispatch("layout-dwindle") }
+let instantFrames = distinctFramesDuring(1) { dispatchWithoutWaiting("layout-dwindle") }
 check("turning animations off makes moves instant", instantFrames < animatedFrames && instantFrames <= 9, "\(instantFrames) distinct frames, \(animatedFrames) when animated")
 writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle"}"#)
 _ = waitUntil { isTiled(count: 3) }
@@ -497,8 +506,10 @@ if let first = status()?.focusedWindow {
     _ = waitUntil { isTiled(count: 3) }
     pump(0.4)
     if let focused = status()?.focusedWindow {
-        dispatch("move-into-group-up")
-        check("a window can move into the group above it", waitUntil { uniqueFrames().count == 2 }, describe())
+        // In this grid there's something either above or below it, depending on which row it's in.
+        let isTopRow = (frames()[Int(focused)]?.minY ?? 0) < screenArea().midY
+        dispatch(isTopRow ? "move-into-group-down" : "move-into-group-up")
+        check("a window can move into a group next to it", waitUntil { uniqueFrames().count == 2 }, describe())
         dispatch("remove-from-group")
         check("and come back out", waitUntil { status()?.focusedWindow == focused && isTiled(count: 3) }, describe())
     }
@@ -523,10 +534,14 @@ if let window = status()?.focusedWindow {
     screenshot("sticky")
     pump(2)
     check("it's the focus on the new workspace", status()?.focusedWindow == window && status()?.workspace == 5)
-    dispatch("workspace-1")
-    _ = waitUntil { status()?.workspace == 1 }
     dispatch("toggle-float")
-    check("tiling it ends being sticky", waitUntil { isTiled(count: 3) }, describe())
+    pump(0.5)
+    dispatch("workspace-1")
+    check("tiling it ends being sticky, so it stays behind", waitUntil { frames()[Int(window)].map(isParked) ?? false }, describe())
+    dispatch("workspace-5")
+    _ = waitUntil { status()?.workspace == 5 }
+    dispatch("move-to-workspace-1")
+    check("and it can rejoin the others", waitUntil { status()?.workspace == 1 && isTiled(count: 3) }, describe())
 }
 
 section("Scrolling layout")
@@ -750,15 +765,20 @@ if testLoginItem {
     dispatch("open-settings-general")
     pump(1.2)
 
+    var seenControls: [String] = []
     func findCheckbox(_ element: AXUIElement, depth: Int = 0) -> AXUIElement? {
         var role: CFTypeRef?
         var title: CFTypeRef?
+        var label: CFTypeRef?
         AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
         AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &title)
-        if role as? String == kAXCheckBoxRole, (title as? String)?.contains("login") == true { return element }
+        AXUIElementCopyAttributeValue(element, kAXDescriptionAttribute as CFString, &label)
+        let name = "\(title as? String ?? "") \(label as? String ?? "")"
+        if seenControls.count < 40 { seenControls.append("\(role as? String ?? "?"): \(name)") }
+        if role as? String == kAXCheckBoxRole, name.contains("login") { return element }
         var children: CFTypeRef?
         AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children)
-        guard depth < 12, let list = children as? [AXUIElement] else { return nil }
+        guard depth < 24, let list = children as? [AXUIElement] else { return nil }
         for child in list {
             if let found = findCheckbox(child, depth: depth + 1) { return found }
         }
@@ -777,7 +797,7 @@ if testLoginItem {
         screenshot("login-item-off")
         check("turning it off removes it", waitUntil { !loginItemRegistered() })
     } else {
-        check("found the Launch at login checkbox", false)
+        check("found the Launch at login checkbox", false, "\(seenControls)")
     }
 }
 
