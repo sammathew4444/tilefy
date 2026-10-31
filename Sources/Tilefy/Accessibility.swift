@@ -114,6 +114,9 @@ final class FrameWriter {
         var isDraining = false
     }
 
+    /// How long an app that couldn't keep up moves instantly, before it gets another chance.
+    private static let slowAppCooldown: TimeInterval = 15
+
     private struct Slide {
         let id: WindowID
         let element: AXUIElement
@@ -240,10 +243,10 @@ final class FrameWriter {
     }
 
     /// Moving a window through Accessibility is slow in some apps, as each step makes the app lay out
-    /// again. If this app can't keep up, it jumps straight to the end, and goes on doing so for a while.
+    /// again. If this app can't keep up, it jumps straight to the end, and goes on doing so for a moment.
     private func slide(_ slides: [Slide], duration: Double, pid: pid_t) {
         guard !slides.isEmpty else { return }
-        let frameBudget: TimeInterval = 0.035
+        let frameBudget: TimeInterval = 0.05
         let frameTarget: TimeInterval = 1.0 / 60
         let start = Date()
         var slowFrames = 0
@@ -265,7 +268,7 @@ final class FrameWriter {
 
             let spent = Date().timeIntervalSince(frameStart)
             slowFrames = spent > frameBudget ? slowFrames + 1 : 0
-            if slowFrames >= 2 {
+            if slowFrames >= 3 {
                 markTooSlowToAnimate(pid)
                 log.notice("Pid \(pid) is too slow to animate (\(Int(spent * 1000)) ms per frame). Moving instantly for now.")
                 break
@@ -297,7 +300,7 @@ final class FrameWriter {
     private func markTooSlowToAnimate(_ pid: pid_t) {
         lock.lock()
         defer { lock.unlock() }
-        tooSlowUntil[pid] = Date().addingTimeInterval(60)
+        tooSlowUntil[pid] = Date().addingTimeInterval(Self.slowAppCooldown)
     }
 
     /// Some apps ignore a resize while they're busy, or apply only part of it. Check, and ask again a

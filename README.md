@@ -185,7 +185,7 @@ $tilefy dispatch reload-config
   crash, restores everything exactly. After a reboot the windows are new ones, so each app's windows
   are matched to their old workspaces by title and app, for three minutes after launch.
 - **Animations stop when they'd get in the way.** They respect Reduce Motion, only run between on-screen
-  places, and an app too slow to keep up simply jumps to its place for the next minute.
+  places, and an app too slow to keep up simply jumps to its place for the next few seconds.
 
 ## Testing
 
