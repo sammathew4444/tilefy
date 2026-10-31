@@ -1,15 +1,30 @@
 #!/bin/zsh
-# Builds build/Tilefy.app. With --install, also copies it to /Applications and launches it.
+# Builds build/Tilefy.app.
+#   --universal  builds for both Apple silicon and Intel
+#   --install    also copies it to /Applications and launches it
 set -euo pipefail
 
 cd "${0:A:h}/.."
 
-swift build -c release --product Tilefy
+universal=false
+install=false
+for argument in "$@"; do
+    case "$argument" in
+        --universal) universal=true ;;
+        --install) install=true ;;
+        *) echo "Unknown option: $argument"; exit 64 ;;
+    esac
+done
+
+build_flags=(-c release)
+if $universal; then build_flags+=(--arch arm64 --arch x86_64); fi
+
+swift build "${build_flags[@]}" --product Tilefy
 
 app=build/Tilefy.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$(swift build -c release --show-bin-path)/Tilefy" "$app/Contents/MacOS/Tilefy"
+cp "$(swift build "${build_flags[@]}" --show-bin-path)/Tilefy" "$app/Contents/MacOS/Tilefy"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 
@@ -26,7 +41,7 @@ fi
 codesign --verify --strict "$app"
 echo "Built $PWD/$app"
 
-if [[ "${1:-}" == "--install" ]]; then
+if $install; then
     pkill -x Tilefy && sleep 0.5 || true
     rm -rf /Applications/Tilefy.app
     cp -R "$app" /Applications/Tilefy.app
