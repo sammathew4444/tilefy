@@ -286,6 +286,23 @@ func uniqueFrames() -> [CGRect] {
     return seen
 }
 
+/// Frames once nothing has moved for a moment. With animations on, windows can look tiled partway
+/// through a slide, so a position to compare against later must wait for this.
+func settledFrames() -> [Int: CGRect] {
+    var last = frames()
+    var stillSince = Date()
+    let deadline = Date().addingTimeInterval(4)
+    while Date() < deadline, Date().timeIntervalSince(stillSince) < 0.4 {
+        pump(0.05)
+        let now = frames()
+        if now != last {
+            last = now
+            stillSince = Date()
+        }
+    }
+    return last
+}
+
 func describe() -> String {
     "\(frames().sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }) screen \(screenArea())"
 }
@@ -446,7 +463,7 @@ dispatch("layout-dwindle")
 check("back to dwindle", waitUntil { isTiled(count: 3) }, describe())
 
 section("Workspaces")
-let home = frames()
+let home = settledFrames()
 dispatch("workspace-2")
 check("switching parks the windows", waitUntil { frames().values.allSatisfy(isParked) }, describe())
 check("parked windows still count as on-screen", frames().count == 3, describe())
@@ -485,7 +502,7 @@ if let newest = status()?.focusedWindow {
 
 section("Minimizing")
 if let target = frames().keys.sorted().first {
-    let before = frames()
+    let before = settledFrames()
     control("minimize:\(target)")
     check("minimizing closes the hole", waitUntil(timeout: 8) { isTiled(count: 2) }, describe())
     control("restore:\(target)")
@@ -570,7 +587,7 @@ if let window = status()?.focusedWindow {
         return abs(frame.midX - screenArea().midX) < areaTolerance
     }, describe())
     pump(0.3)
-    let stuck = frames()[Int(window)]
+    let stuck = settledFrames()[Int(window)]
     dispatch("workspace-5")
     check("it stays on screen across workspaces", waitUntil {
         status()?.workspace == 5 && frames().filter { $0.key != Int(window) }.values.allSatisfy(isParked)
@@ -617,7 +634,7 @@ check("switching layout brings every window back", waitUntil { isTiled(count: 6)
 
 section("Apps that resize themselves")
 if let target = frames().keys.sorted().first {
-    let slot = frames()[target]
+    let slot = settledFrames()[target]
     control("resize-self:\(target)")
     _ = waitUntil(timeout: 1) { frames()[target] != slot }
     dispatch("retile")
@@ -641,7 +658,7 @@ if let target = frames().keys.sorted().first {
 
 section("Native fullscreen, which is a real Space switch")
 if let target = status()?.focusedWindow {
-    let before = frames()
+    let before = settledFrames()
     control("fullscreen:\(target)")
     let screenFrame = NSScreen.screens[0].frame
     check("the window goes fullscreen", waitUntil(timeout: 10) {
@@ -679,7 +696,7 @@ if AXIsProcessTrusted() {
     dispatch("layout-grid")
     _ = waitUntil { isTiled(count: 6) }
     pump(0.5)
-    let before = frames()
+    let before = settledFrames()
     let ids = before.keys.sorted()
     if ids.count >= 2, let a = before[ids[0]], let b = before[ids[1]] {
         func mouse(_ type: CGEventType, _ point: CGPoint) {
@@ -959,7 +976,7 @@ func tilefyPID() -> Int32? {
 }
 
 func restartAndCheck(signal: Int32, name: String) {
-    let beforeFrames = frames()
+    let beforeFrames = settledFrames()
     let beforeStatus = status()
     pump(1.5)  // Long enough for the state to be saved.
     if let pid = tilefyPID() { kill(pid, signal) }
