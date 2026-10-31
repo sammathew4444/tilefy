@@ -55,6 +55,11 @@ public final class Workspace {
     /// On another native Space, minimized or hidden: keeps its slot but takes no space.
     public private(set) var suspended: Set<WindowID> = []
 
+    /// Window groups: several windows sharing one tile, with one showing. Keyed by the window
+    /// currently holding the tile, and listing all members in tab order, including that one.
+    /// The layouts only ever see the window holding the tile.
+    public private(set) var groups: [WindowID: [WindowID]] = [:]
+
     var masterRatio: CGFloat = 0.55
     let dwindle = DwindleTree()
     var strip = ScrollingStrip()
@@ -66,12 +71,30 @@ public final class Workspace {
 
     public var visibleTiled: [WindowID] { order.filter { !suspended.contains($0) } }
     public var isEmpty: Bool { order.isEmpty && floating.isEmpty }
-    public var allWindows: [WindowID] { order + floating }
+    public var allWindows: [WindowID] { order + floating + behindGroups }
 
-    public func contains(_ id: WindowID) -> Bool { order.contains(id) || floating.contains(id) }
+    /// Grouped windows that aren't the one showing.
+    private var behindGroups: [WindowID] {
+        groups.flatMap { slot, members in members.filter { $0 != slot } }.sorted()
+    }
+
+    public func contains(_ id: WindowID) -> Bool {
+        order.contains(id) || floating.contains(id) || groups.values.contains { $0.contains(id) }
+    }
+
+    /// The window holding the tile for the group `id` is in, if it's in one.
+    public func groupSlot(of id: WindowID) -> WindowID? {
+        groups.first { $0.value.contains(id) }?.key
+    }
+
+    /// The other members of a tile's group that should share its frame.
+    func visibleBehind(_ slot: WindowID) -> [WindowID] {
+        (groups[slot] ?? []).filter { $0 != slot && !suspended.contains($0) }
+    }
     public func isFloating(_ id: WindowID) -> Bool { floating.contains(id) }
 
     func setFocused(_ id: WindowID?) {
+        if let id, groupSlot(of: id) != id, groupSlot(of: id) != nil { activateInGroup(id) }
         focused = id
         if let id, order.contains(id) { lastTiledFocus = id }
     }
@@ -93,6 +116,7 @@ public final class Workspace {
 
     /// Removes a window from every structure and moves focus to a sensible neighbour.
     func remove(_ id: WindowID) {
+        if leaveGroup(id) { return }
         let wasFocused = focused == id
         let index = order.firstIndex(of: id)
         order.removeAll { $0 == id }
@@ -108,6 +132,18 @@ public final class Workspace {
     /// Takes a window out of the layout but remembers its slot.
     func suspend(_ id: WindowID) {
         guard contains(id), !suspended.contains(id) else { return }
+        // In a group, the next member takes over the tile, so the tile stays filled.
+        if groupSlot(of: id) == id, let next = groups[id]?.first(where: { $0 != id && !suspended.contains($0) }) {
+            let wasFocused = focused == id
+            activateInGroup(next)
+            if wasFocused { focused = next }
+            suspended.insert(id)
+            return
+        }
+        if let slot = groupSlot(of: id), slot != id {
+            suspended.insert(id)
+            return
+        }
         let index = order.firstIndex(of: id)
         suspended.insert(id)
         if fullscreen == id { fullscreen = nil }
@@ -120,6 +156,8 @@ public final class Workspace {
 
     func resume(_ id: WindowID) {
         suspended.remove(id)
+        // The whole group was away, and this member is first back. It takes the tile.
+        if let slot = groupSlot(of: id), slot != id, suspended.contains(slot) { activateInGroup(id) }
         // Everything was away, so nothing has focus. A workspace with windows shouldn't stay that way.
         if focused == nil, order.contains(id) { setFocused(id) }
     }
@@ -155,16 +193,128 @@ public final class Workspace {
             insertTiled(id)
             lastTiledFocus = id
         } else if order.contains(id) {
-            let index = order.firstIndex(of: id)!
-            order.remove(at: index)
-            dwindle.remove(id)
-            strip.remove(id)
-            if fullscreen == id { fullscreen = nil }
-            if lastTiledFocus == id {
-                lastTiledFocus = order[..<index].last { !suspended.contains($0) } ?? visibleTiled.first
+            // A member leaves the group behind it. A group of one stops being a group.
+            if !leaveGroup(id) {
+                groups[id] = nil
+                detachTile(id)
             }
             floating.append(id)
+            focused = id
         }
+    }
+
+    /// Takes a tile out of the layout, without touching focus.
+    private func detachTile(_ id: WindowID) {
+        guard let index = order.firstIndex(of: id) else { return }
+        order.remove(at: index)
+        dwindle.remove(id)
+        strip.remove(id)
+        if fullscreen == id { fullscreen = nil }
+        if lastTiledFocus == id {
+            lastTiledFocus = order[..<index].last { !suspended.contains($0) } ?? visibleTiled.first
+        }
+    }
+
+    // MARK: - Groups
+
+    /// Puts another window in a tile's place in every layout.
+    private func replaceTile(_ old: WindowID, with new: WindowID) {
+        guard let index = order.firstIndex(of: old) else { return }
+        order[index] = new
+        dwindle.replace(old, with: new)
+        strip.replace(old, with: new)
+        if fullscreen == old { fullscreen = new }
+        if lastTiledFocus == old { lastTiledFocus = new }
+    }
+
+    /// Makes `id` the member showing in its group.
+    func activateInGroup(_ id: WindowID) {
+        guard let slot = groupSlot(of: id), slot != id, let members = groups[slot] else { return }
+        replaceTile(slot, with: id)
+        groups[slot] = nil
+        groups[id] = members
+        if focused == slot { focused = id }
+    }
+
+    /// Removes `id` from a group it shares with others. Returns false if it isn't in such a group,
+    /// in which case the caller still has a window to deal with.
+    private func leaveGroup(_ id: WindowID) -> Bool {
+        guard let slot = groupSlot(of: id), let members = groups[slot] else { return false }
+        guard members.count > 1 else {
+            groups[slot] = nil
+            return false
+        }
+        if slot == id {
+            let position = members.firstIndex(of: id)!
+            let others = members.filter { $0 != id }
+            let next = others[..<min(position, others.count)].last { !suspended.contains($0) }
+                ?? others.first { !suspended.contains($0) }
+                ?? others[0]
+            activateInGroup(next)
+        }
+        groups[groupSlot(of: id)!]?.removeAll { $0 == id }
+        suspended.remove(id)
+        // The remaining members may all be away, in which case focus has to go elsewhere.
+        if let focused, suspended.contains(focused) { focusNeighbour(ofRemovedIndex: order.firstIndex(of: focused)) }
+        return true
+    }
+
+    /// Makes a tile a group, or breaks up the group it's in, giving each member its own tile.
+    func toggleGroup(_ id: WindowID) {
+        guard order.contains(id) else { return }
+        guard let members = groups[id] else {
+            groups[id] = [id]
+            return
+        }
+        groups[id] = nil
+        lastTiledFocus = id
+        for member in members where member != id {
+            insertTiled(member)
+        }
+    }
+
+    /// Adds a tile to the group on the tile `target`, which becomes a group if it wasn't one.
+    func addToGroup(_ id: WindowID, target: WindowID) {
+        guard order.contains(target), id != target else { return }
+        if groups[target] == nil { groups[target] = [target] }
+        groups[target]?.append(id)
+        activateInGroup(id)
+    }
+
+    /// Moves a tile, or a member of another group, into the group on `target`.
+    func moveIntoGroup(_ id: WindowID, target: WindowID) {
+        guard order.contains(target), id != target, groupSlot(of: target) != groupSlot(of: id) || groupSlot(of: id) == nil else { return }
+        if !leaveGroup(id) { detachTile(id) }
+        addToGroup(id, target: target)
+        focused = id
+        lastTiledFocus = id
+    }
+
+    /// Takes a member out of its group, into a tile of its own next to the group.
+    func removeFromGroup(_ id: WindowID) {
+        guard let members = groups[groupSlot(of: id) ?? id] else { return }
+        guard members.count > 1 else {
+            groups[id] = nil
+            return
+        }
+        _ = leaveGroup(id)
+        lastTiledFocus = groupSlot(of: members.first { $0 != id }!)
+        insertTiled(id)
+        focused = id
+        lastTiledFocus = id
+    }
+
+    /// Shows the next or previous member. Returns the window now showing.
+    @discardableResult
+    func cycleGroup(of id: WindowID, by delta: Int) -> WindowID? {
+        guard let members = groups[groupSlot(of: id) ?? id]?.filter({ !suspended.contains($0) }),
+              members.count > 1, let index = members.firstIndex(of: id)
+        else { return nil }
+        let next = members[(index + delta + members.count) % members.count]
+        activateInGroup(next)
+        focused = next
+        lastTiledFocus = next
+        return next
     }
 
     func toggleSplit(of id: WindowID) {
@@ -275,5 +425,63 @@ public final class Workspace {
             remaining = remaining.dropFirst(inRow)
         }
         return result
+    }
+}
+
+// MARK: - Saving and restoring
+
+struct SavedWorkspace: Codable, Equatable {
+    var id: Int
+    var layout: LayoutKind
+    var monitor: MonitorID?
+    var order: [WindowID]
+    var floating: [WindowID]
+    var groups: [WindowID: [WindowID]]
+    var focused: WindowID?
+    var lastTiledFocus: WindowID?
+    var fullscreen: WindowID?
+    var masterRatio: CGFloat
+    var dwindle: DwindleTree.Shape?
+    var columns: [ScrollingStrip.Column]
+    var offset: CGFloat
+    var defaultWidth: CGFloat
+}
+
+extension Workspace {
+    var saved: SavedWorkspace {
+        SavedWorkspace(
+            id: id,
+            layout: layout,
+            monitor: monitor,
+            order: order,
+            floating: floating,
+            groups: groups,
+            focused: focused,
+            lastTiledFocus: lastTiledFocus,
+            fullscreen: fullscreen,
+            masterRatio: masterRatio,
+            dwindle: dwindle.shape,
+            columns: strip.columns,
+            offset: strip.offset,
+            defaultWidth: strip.defaultWidth
+        )
+    }
+
+    /// Restores everything, with all windows away until they're found on screen again.
+    convenience init(restoring saved: SavedWorkspace) {
+        self.init(id: saved.id, layout: saved.layout)
+        monitor = saved.monitor
+        order = saved.order
+        floating = saved.floating
+        groups = saved.groups
+        focused = saved.focused
+        lastTiledFocus = saved.lastTiledFocus
+        fullscreen = saved.fullscreen
+        masterRatio = saved.masterRatio
+        dwindle.restore(saved.dwindle)
+        strip.columns = saved.columns
+        strip.offset = saved.offset
+        strip.defaultWidth = saved.defaultWidth
+        suspended = Set(allWindows)
     }
 }

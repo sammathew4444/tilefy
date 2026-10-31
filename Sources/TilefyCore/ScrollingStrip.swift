@@ -4,7 +4,7 @@ import CoreGraphics
 /// New windows join the row without resizing anything, and the viewport slides to keep the
 /// focused column in view.
 struct ScrollingStrip {
-    struct Column {
+    struct Column: Codable, Equatable {
         var windows: [WindowID]
         /// Fraction of the viewport width, so it survives moving between displays.
         var width: CGFloat
@@ -39,6 +39,12 @@ struct ScrollingStrip {
         guard let index = columnIndex(of: id) else { return }
         columns[index].windows.removeAll { $0 == id }
         if columns[index].windows.isEmpty { columns.remove(at: index) }
+    }
+
+    /// Puts another window in the same place in the row.
+    mutating func replace(_ old: WindowID, with new: WindowID) {
+        guard let column = columnIndex(of: old), let row = columns[column].windows.firstIndex(of: old) else { return }
+        columns[column].windows[row] = new
     }
 
     mutating func swap(_ a: WindowID, _ b: WindowID) {

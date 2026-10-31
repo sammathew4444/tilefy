@@ -15,6 +15,12 @@ public enum Command: Equatable, Sendable {
     case moveWorkspaceToMonitorNext
     case moveToScratchpad
     case toggleScratchpad
+    case toggleGroup
+    case removeFromGroup
+    case groupNext
+    case groupPrevious
+    case moveIntoGroup(Direction)
+    case toggleSticky
     case layout(LayoutKind)
     case toggleDwindleScrolling
     case layoutNext
@@ -61,6 +67,10 @@ public enum Command: Equatable, Sendable {
                 self = .swap(direction)
                 return
             }
+            if string == "move-into-group-\(direction.rawValue)" {
+                self = .moveIntoGroup(direction)
+                return
+            }
         }
         for kind in LayoutKind.allCases where string == "layout-\(kind.rawValue)" {
             self = .layout(kind)
@@ -78,6 +88,11 @@ public enum Command: Equatable, Sendable {
         case "move-workspace-to-monitor-next": self = .moveWorkspaceToMonitorNext
         case "move-to-scratchpad": self = .moveToScratchpad
         case "toggle-scratchpad": self = .toggleScratchpad
+        case "toggle-group": self = .toggleGroup
+        case "remove-from-group": self = .removeFromGroup
+        case "group-next": self = .groupNext
+        case "group-previous": self = .groupPrevious
+        case "toggle-sticky": self = .toggleSticky
         case "layout-toggle": self = .toggleDwindleScrolling
         case "layout-next": self = .layoutNext
         case "toggle-split": self = .toggleSplit

@@ -13,6 +13,7 @@ final class SimulatedMac: WindowSystem {
         var fullScreen = false
         var cannotTile = false
         var bundleID: String?
+        var title: String?
         var isReady = true
         /// Ignores every attempt to move or resize it.
         var isStubborn = false
@@ -114,7 +115,7 @@ final class SimulatedMac: WindowSystem {
         ids.compactMap { id in
             guard let window = windows[id], window.pid == pid else { return nil }
             guard window.isReady else { return .reject(id: id) }
-            return .manage(id: id, pid: pid, frame: window.frame, cannotTile: window.cannotTile, bundleID: window.bundleID)
+            return .manage(id: id, pid: pid, frame: window.frame, cannotTile: window.cannotTile, bundleID: window.bundleID, title: window.title)
         }
     }
 
@@ -132,8 +133,23 @@ final class SimulatedMac: WindowSystem {
 
     private(set) var applyCount = 0
 
-    func carryOut(plan: LayoutPlan, skipping: WindowID?, focus: WindowID?, monitors: [Monitor], completion: @escaping () -> Void) {
+    private(set) var lastAnimationDuration: Double = -1
+    var savedState: Data?
+    var session = "boot-1"
+    var sessionID: String { session }
+    func loadState() -> Data? { savedState }
+    func saveState(_ data: Data) { savedState = data }
+
+    func carryOut(
+        plan: LayoutPlan,
+        skipping: WindowID?,
+        focus: WindowID?,
+        monitors: [Monitor],
+        animationDuration: Double,
+        completion: @escaping () -> Void
+    ) {
         applyCount += 1
+        lastAnimationDuration = animationDuration
         for (id, frame) in plan.frames where id != skipping && windows[id]?.isStubborn != true {
             if windows[id]?.frame != frame { moveCount += 1 }
             windows[id]?.frame = frame
@@ -170,7 +186,11 @@ final class SimulatedMac: WindowSystem {
         tilefyIsFrontmost = true
     }
 
-    func showBorder(around frame: CGRect?, width: Double) { border = frame }
+    private(set) var borderStyle: BorderStyle = .normal
+    func showBorder(around frame: CGRect?, width: Double, style: BorderStyle) {
+        border = frame
+        borderStyle = style
+    }
     func showHUD(_ text: String, on monitor: Monitor) { hud.append(text) }
 
     var isMouseDown: Bool { mouseDown }

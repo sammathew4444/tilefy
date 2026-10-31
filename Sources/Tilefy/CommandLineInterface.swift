@@ -10,6 +10,7 @@ enum CommandLineInterface {
     /// Opens a Settings tab: general, layouts, shortcuts or apps.
     static let settingsPrefix = "open-settings"
     static let togglePause = "toggle-pause"
+    static let reloadConfig = "reload-config"
 
     /// Returns an exit code if the arguments were a command-line request, or nil to launch the app.
     static func runIfRequested(_ arguments: [String]) -> Int32? {
@@ -20,7 +21,7 @@ enum CommandLineInterface {
                 return 64
             }
             let command = arguments[2]
-            guard Command(command) != nil || command.hasPrefix(settingsPrefix) || command == togglePause else {
+            guard Command(command) != nil || command.hasPrefix(settingsPrefix) || command == togglePause || command == reloadConfig else {
                 print("unknown command: \(command)")
                 return 64
             }

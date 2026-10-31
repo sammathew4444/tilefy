@@ -16,6 +16,7 @@ final class AccessibilitySystem: WindowSystem {
     private let writer = FrameWriter()
     private let border = FocusBorder()
     private let hud = HUD()
+    private var lastBorderFrame: CGRect?
     private var workspaceObservers: [NSObjectProtocol] = []
     /// When set, only this app's windows are managed. See `--only-app` in the README.
     private let onlyApp: String?
@@ -165,7 +166,8 @@ final class AccessibilitySystem: WindowSystem {
                 pid: pid,
                 frame: frame,
                 cannotTile: Self.cannotTile(element),
-                bundleID: app.bundleIdentifier ?? app.localizedName
+                bundleID: app.bundleIdentifier ?? app.localizedName,
+                title: AX.attribute(element, kAXTitleAttribute, as: String.self)
             ))
         }
         return results
@@ -220,8 +222,15 @@ final class AccessibilitySystem: WindowSystem {
         skipping: WindowID?,
         focus: WindowID?,
         monitors: [Monitor],
+        animationDuration: Double,
         completion: @escaping () -> Void
     ) {
+        let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : animationDuration
+        // The outline would lag behind a sliding window, so it comes back once the window has arrived.
+        if duration > 0, let focused = plan.focused, let target = plan.frames[focused], target != lastBorderFrame {
+            border.hide()
+        }
+
         struct Batch {
             var frames: [(WindowID, AXUIElement, CGRect)] = []
             var hides: [(WindowID, AXUIElement, MonitorID)] = []
@@ -251,6 +260,7 @@ final class AccessibilitySystem: WindowSystem {
                 hides: batch.hides,
                 focus: pid == focusEntry?.pid ? focusEntry?.element : nil,
                 monitors: monitors,
+                animationDuration: duration,
                 completion: pid == waitFor ? completion : nil
             )
         }
@@ -269,13 +279,40 @@ final class AccessibilitySystem: WindowSystem {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func showBorder(around frame: CGRect?, width: Double) {
+    func showBorder(around frame: CGRect?, width: Double, style: BorderStyle) {
+        lastBorderFrame = frame
         if let frame {
-            border.show(around: frame, width: width)
+            border.show(around: frame, width: width, style: style)
         } else {
             border.hide()
         }
     }
+
+    // MARK: - Saved state
+
+    private static let stateURL: URL = {
+        if let path = ProcessInfo.processInfo.environment["TILEFY_STATE"] {
+            return URL(fileURLWithPath: path)
+        }
+        return Config.fileURL.deletingLastPathComponent().appendingPathComponent("state.json")
+    }()
+
+    func loadState() -> Data? {
+        try? Data(contentsOf: Self.stateURL)
+    }
+
+    func saveState(_ data: Data) {
+        let url = Self.stateURL
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
+    }
+
+    lazy var sessionID: String = {
+        var bootTime = timeval()
+        var size = MemoryLayout<timeval>.size
+        sysctlbyname("kern.boottime", &bootTime, &size, nil, 0)
+        return String(bootTime.tv_sec)
+    }()
 
     func showHUD(_ text: String, on monitor: Monitor) {
         hud.show(text, on: monitor)

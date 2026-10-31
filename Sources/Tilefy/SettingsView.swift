@@ -96,7 +96,7 @@ struct SettingsView: View {
             AppsTab(model: model).tag("apps").tabItem { Label("Apps", systemImage: "macwindow.on.rectangle") }
         }
         .padding(16)
-        .frame(width: 560, height: 520)
+        .frame(width: 580, height: 640)
     }
 }
 
@@ -136,7 +136,21 @@ private struct GeneralTab: View {
 
             Toggle("Outline the focused window", isOn: $model.config.focusBorder)
             Toggle("Show workspace and layout when they change", isOn: $model.config.showHUD)
+            Toggle("Animate windows moving", isOn: $model.config.animations)
             Toggle("Scroll with the modifier held to switch workspace or focus", isOn: $model.config.modifierScroll)
+            Toggle("Swipe on the trackpad to move along the row or between workspaces", isOn: $model.config.trackpadSwipes)
+            if model.config.trackpadSwipes {
+                Picker("Swipe with", selection: $model.config.swipeFingers) {
+                    Text("Three fingers").tag(3)
+                    Text("Four fingers").tag(4)
+                }
+                if macOSUsesSwipe(fingers: model.config.swipeFingers) {
+                    Text("macOS also uses this swipe to switch between Spaces. You can turn that off in System Settings › Trackpad › More Gestures.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
 
             Section("Spacing") {
                 Stepper(value: $model.config.innerGap, in: 0...64, step: 2) {
@@ -163,6 +177,12 @@ private struct GeneralTab: View {
             }
         }
     }
+}
+
+/// Whether macOS's own "swipe between full-screen apps" gesture is set to this number of fingers.
+private func macOSUsesSwipe(fingers: Int) -> Bool {
+    let key = fingers == 3 ? "TrackpadThreeFingerHorizSwipeGesture" : "TrackpadFourFingerHorizSwipeGesture"
+    return UserDefaults(suiteName: "com.apple.AppleMultitouchTrackpad")?.integer(forKey: key) == 2
 }
 
 private struct LayoutsTab: View {

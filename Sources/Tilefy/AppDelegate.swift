@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var manager: WindowCoordinator!
     private var system: AccessibilitySystem!
     private var scrollTap: ModifierScrollTap?
+    private var swipeTap: TrackpadSwipeTap?
     private var settingsModel: SettingsModel?
     private let hotkeys = HotkeyCenter()
     private var statusItem: NSStatusItem!
@@ -74,6 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self, let command = note.object as? String else { return }
             if command == CommandLineInterface.togglePause {
                 self.togglePause()
+            } else if command == CommandLineInterface.reloadConfig {
+                self.reloadConfig()
             } else if command.hasPrefix(CommandLineInterface.settingsPrefix) {
                 self.showSettings(tab: String(command.dropFirst(CommandLineInterface.settingsPrefix.count + 1)))
             } else {
@@ -101,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         registerHotkeys()
         manager.start()
         updateScrollTap()
+        updateSwipeTap()
         updateStatusItem()
     }
 
@@ -110,6 +114,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard manager.config.modifierScroll, manager.isStarted else { return }
         scrollTap = ModifierScrollTap(modifier: manager.config.modifier) { [weak self] dx, dy in
             self?.manager.scrolled(dx: dx, dy: dy)
+        }
+    }
+
+    private func updateSwipeTap() {
+        guard manager.config.trackpadSwipes, manager.isStarted else {
+            swipeTap?.invalidate()
+            swipeTap = nil
+            return
+        }
+        guard swipeTap == nil else { return }
+        swipeTap = TrackpadSwipeTap { [weak self] touches in
+            self?.manager.trackpadTouches(touches)
         }
     }
 
@@ -275,6 +291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         manager.update(config: config)
         if shortcutsChanged, manager.isStarted, settingsModel?.recording == nil { registerHotkeys() }
         if scrollChanged { updateScrollTap() }
+        updateSwipeTap()
     }
 
     @objc private func openSettings() {

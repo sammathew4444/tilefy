@@ -17,6 +17,21 @@ public struct TilefyStatus: Codable, Equatable {
     public var windows: [String: Int]
 }
 
+/// What's written to disk so that Tilefy can pick up where it left off.
+struct SavedState: Codable {
+    static let currentVersion = 1
+
+    struct Origin: Codable, Equatable {
+        var bundleID: String?
+        var title: String?
+    }
+
+    var version: Int
+    var session: String
+    var engine: TilingEngine.SavedEngine
+    var origins: [WindowID: Origin]
+}
+
 /// Connects the engine to the system: it notices what windows exist, feeds that to the engine, and
 /// carries out the engine's plans.
 ///
@@ -53,6 +68,19 @@ public final class WindowCoordinator {
     private var lastSystemFocus: WindowID?
 
     private var draggedWindow: WindowID?
+    private var swipes: SwipeRecognizer
+
+    // Saving and restoring.
+    private var origins: [WindowID: SavedState.Origin] = [:]
+    private var saveGeneration = 0
+    private var restoredOrigins: [WindowID: SavedState.Origin] = [:]
+    /// Saved windows that weren't on screen at launch (minimized, say). They return to their workspace.
+    private var lateRestores: [WindowID: (workspace: Int, floating: Bool, bundleID: String?)] = [:]
+    /// After a reboot window IDs mean nothing, so windows are matched to their old workspace by app and title.
+    private var placementsByApp: [String: [(title: String?, workspace: Int, floating: Bool)]] = [:]
+    private var placementsExpire: Date?
+    static let placementWindow: TimeInterval = 180
+
     /// Windows that aren't where the layout wants them, and how often Tilefy has tried to fix that.
     private var driftAttempts: [WindowID: (target: CGRect, count: Int)] = [:]
 
@@ -64,6 +92,7 @@ public final class WindowCoordinator {
         self.config = config
         self.system = system
         self.engine = TilingEngine(options: config.tilingOptions) { [weak system] id in system?.frame(of: id) }
+        self.swipes = SwipeRecognizer(fingers: config.swipeFingers)
     }
 
     // MARK: - Lifecycle
@@ -71,6 +100,7 @@ public final class WindowCoordinator {
     public func start() {
         guard !isStarted else { return }
         isStarted = true
+        restoreSavedState()
         engine.setMonitors(system.currentMonitors())
         system.attachToRunningApps()
         reconcile(full: true, isInitialScan: true)
@@ -89,8 +119,9 @@ public final class WindowCoordinator {
     /// Leaves every window reachable. The ones parked out of sight come back on-screen.
     public func stop() {
         guard isStarted else { return }
+        saveNow()
         restoreParkedWindows()
-        system.showBorder(around: nil, width: 0)
+        system.showBorder(around: nil, width: 0, style: .normal)
         isStarted = false
     }
 
@@ -99,7 +130,7 @@ public final class WindowCoordinator {
         isPaused = paused
         if paused {
             restoreParkedWindows()
-            system.showBorder(around: nil, width: 0)
+            system.showBorder(around: nil, width: 0, style: .normal)
         } else {
             engine.setMonitors(system.currentMonitors())
             reconcile(full: true)
@@ -109,6 +140,7 @@ public final class WindowCoordinator {
     }
 
     public func update(config: Config) {
+        if config.swipeFingers != self.config.swipeFingers { swipes = SwipeRecognizer(fingers: config.swipeFingers) }
         self.config = config
         engine.options = config.tilingOptions
         apply(focus: false)
@@ -119,7 +151,7 @@ public final class WindowCoordinator {
     public func displaysChanged() {
         guard !isPaused, isStarted else { return }
         engine.setMonitors(system.currentMonitors())
-        apply(focus: false)
+        apply(focus: false, animate: false)
         onStateChange?()
     }
 
@@ -190,16 +222,17 @@ public final class WindowCoordinator {
         let addedAny = discoverWindows(onScreen: onScreen, isInitialScan: isInitialScan)
         if addedAny { changed = true }
         rejected = rejected.filter { onScreen[$0.key] != nil }
+        if isInitialScan { setAsideUnfoundWindows() }
 
         let focusChanged = syncFocus(applyChanges: false)
         if changed || focusChanged || isInitialScan {
-            apply(focus: focusedWindowClosed)
+            apply(focus: focusedWindowClosed, animate: !isInitialScan)
             onStateChange?()
         }
 
         if addedAny {
             // Many apps adjust a new window's size just after showing it, so check it again.
-            system.after(0.35) { [weak self] in self?.apply(focus: false) }
+            system.after(0.35) { [weak self] in self?.apply(focus: false, animate: false) }
         }
     }
 
@@ -228,7 +261,7 @@ public final class WindowCoordinator {
             driftAttempts[id] = attempt
         }
         driftAttempts = driftAttempts.filter { lastPlan.frames[$0.key] != nil }
-        if needsApply { apply(focus: false) }
+        if needsApply { apply(focus: false, animate: false) }
     }
 
     private func isClose(_ a: CGRect, _ b: CGRect) -> Bool {
@@ -244,14 +277,14 @@ public final class WindowCoordinator {
         }
         guard !unknown.isEmpty else { return false }
 
-        var found: [(id: WindowID, pid: Int32, frame: CGRect, cannotTile: Bool, bundleID: String?)] = []
+        var found: [(id: WindowID, pid: Int32, frame: CGRect, cannotTile: Bool, bundleID: String?, title: String?)] = []
         for pid in Set(unknown.values).sorted() {
             let ids = Set(unknown.filter { $0.value == pid }.keys)
             for inspection in system.inspectWindows(pid: pid, among: ids) {
                 switch inspection {
-                case let .manage(id, pid, frame, cannotTile, bundleID):
+                case let .manage(id, pid, frame, cannotTile, bundleID, title):
                     rejected[id] = nil
-                    found.append((id, pid, frame, cannotTile, bundleID))
+                    found.append((id, pid, frame, cannotTile, bundleID, title))
                 case let .reject(id):
                     if rejected[id] == nil { rejected[id] = now }
                 }
@@ -263,18 +296,106 @@ public final class WindowCoordinator {
 
         for window in found {
             owners[window.id] = window.pid
+            origins[window.id] = SavedState.Origin(bundleID: window.bundleID, title: window.title)
             let bundleID = window.bundleID ?? ""
-            let floats = window.cannotTile || config.floatApps.contains(bundleID)
-            // A window stays on the display macOS opened it on, unless an app rule says otherwise.
+
+            // A window that's still in the saved layout simply goes back into its slot.
+            if engine.isTracked(window.id) {
+                if restoredOrigins[window.id]?.bundleID == window.bundleID {
+                    engine.resumeWindow(window.id)
+                    continue
+                }
+                engine.removeWindow(window.id)  // The ID has been reused by another app's window.
+            }
+
+            var floats = window.cannotTile || config.floatApps.contains(bundleID)
+            var workspace = config.appWorkspaces[bundleID].flatMap { (1...9).contains($0) ? $0 : nil }
+            if let saved = savedPlacement(for: window.id, bundleID: window.bundleID, title: window.title) {
+                workspace = workspace ?? saved.workspace
+                floats = floats || saved.floating
+            }
+            // A window stays on the display macOS opened it on, unless a rule or saved state says otherwise.
             engine.addWindow(
                 window.id,
                 floating: floats,
                 monitor: engine.monitorID(nearest: window.frame),
-                workspace: config.appWorkspaces[bundleID].flatMap { (1...9).contains($0) ? $0 : nil },
+                workspace: workspace,
                 focus: isInitialScan
             )
         }
         return !found.isEmpty
+    }
+
+    // MARK: - Saving and restoring
+
+    private func restoreSavedState() {
+        guard let data = system.loadState(),
+              let saved = try? JSONDecoder().decode(SavedState.self, from: data),
+              saved.version == SavedState.currentVersion
+        else { return }
+
+        if saved.session == system.sessionID {
+            engine.restore(saved.engine)
+            restoredOrigins = saved.origins
+            log.notice("Restored the saved layout.")
+        } else {
+            // A reboot: the windows are gone, but each app's windows can go back to the same workspaces.
+            engine.restoreLayouts(saved.engine)
+            for ws in saved.engine.workspaces where ws.id != TilingEngine.scratchpadID {
+                for id in ws.order + ws.floating + ws.groups.values.flatMap({ $0 }) {
+                    guard let origin = saved.origins[id], let bundleID = origin.bundleID else { continue }
+                    let entry = (title: origin.title, workspace: ws.id, floating: ws.floating.contains(id))
+                    if !(placementsByApp[bundleID]?.contains { $0.title == entry.title && $0.workspace == entry.workspace } ?? false) {
+                        placementsByApp[bundleID, default: []].append(entry)
+                    }
+                }
+            }
+            placementsExpire = system.now.addingTimeInterval(Self.placementWindow)
+            log.notice("Restored layouts from before the last boot.")
+        }
+    }
+
+    private func savedPlacement(for id: WindowID, bundleID: String?, title: String?) -> (workspace: Int, floating: Bool)? {
+        if let late = lateRestores.removeValue(forKey: id) {
+            return late.bundleID == bundleID ? (late.workspace, late.floating) : nil
+        }
+        guard let bundleID, var candidates = placementsByApp[bundleID], let expires = placementsExpire, system.now < expires else {
+            return nil
+        }
+        let index = candidates.firstIndex { $0.title == title } ?? 0
+        let match = candidates.remove(at: index)
+        placementsByApp[bundleID] = candidates.isEmpty ? nil : candidates
+        return (match.workspace, match.floating)
+    }
+
+    /// Saved windows that didn't turn up in the first scan might be minimized or on another Space, or
+    /// might have closed while Tilefy wasn't running. Close up their slots. If they do reappear, they
+    /// go back to the same workspace.
+    private func setAsideUnfoundWindows() {
+        for window in engine.windowsStillAway() where owners[window.id] == nil {
+            lateRestores[window.id] = (window.workspace, window.floating, restoredOrigins[window.id]?.bundleID)
+            engine.removeWindow(window.id)
+        }
+    }
+
+    private func scheduleSave() {
+        saveGeneration += 1
+        let generation = saveGeneration
+        system.after(1) { [weak self] in
+            guard let self, generation == self.saveGeneration else { return }
+            self.saveNow()
+        }
+    }
+
+    private func saveNow() {
+        guard isStarted else { return }
+        let state = SavedState(
+            version: SavedState.currentVersion,
+            session: system.sessionID,
+            engine: engine.save(),
+            origins: origins
+        )
+        if let data = try? JSONEncoder().encode(state) { system.saveState(data) }
     }
 
     // MARK: - Focus
@@ -293,12 +414,12 @@ public final class WindowCoordinator {
         case .tilefy:
             // Whatever gets focus next counts as a change, even the window that had it before.
             lastSystemFocus = nil
-            system.showBorder(around: nil, width: 0)
+            system.showBorder(around: nil, width: 0, style: .normal)
             return false
         case let .app(_, focused?) where engine.isTracked(focused):
             id = focused
         case .app, .unknown:
-            system.showBorder(around: nil, width: 0)
+            system.showBorder(around: nil, width: 0, style: .normal)
             return false
         }
 
@@ -341,7 +462,7 @@ public final class WindowCoordinator {
               let focused = engine.focusedWindow, lastPlan.hidden[focused] == nil,
               let pid = owners[focused], let frame = system.frame(of: focused)
         else {
-            system.showBorder(around: nil, width: 0)
+            system.showBorder(around: nil, width: 0, style: .normal)
             return
         }
         // Another app may be frontmost with no tracked window, like a panel. Don't draw over it.
@@ -349,18 +470,20 @@ public final class WindowCoordinator {
         if case let .app(frontPID, _) = system.frontmost(), frontPID == pid { isFront = true }
         let isExpected = requestedFocus.map { $0.window == focused && system.now < $0.until } ?? false
         guard isFront || isExpected else {
-            system.showBorder(around: nil, width: 0)
+            system.showBorder(around: nil, width: 0, style: .normal)
             return
         }
-        system.showBorder(around: frame, width: config.focusBorderWidth)
+        let style: BorderStyle = engine.isSticky(focused) ? .sticky : (engine.groupPosition(of: focused) != nil ? .grouped : .normal)
+        system.showBorder(around: frame, width: config.focusBorderWidth, style: style)
     }
 
     // MARK: - Applying plans
 
-    private func apply(focus: Bool) {
+    private func apply(focus: Bool, animate: Bool = true) {
         guard !isPaused, isStarted else { return }
         let plan = engine.plan()
         lastPlan = plan
+        scheduleSave()
 
         var focusTarget: WindowID?
         if focus {
@@ -376,7 +499,13 @@ public final class WindowCoordinator {
                 system.clearFocus()
             }
         }
-        system.carryOut(plan: plan, skipping: draggedWindow, focus: focusTarget, monitors: engine.monitors) { [weak self] in
+        system.carryOut(
+            plan: plan,
+            skipping: draggedWindow,
+            focus: focusTarget,
+            monitors: engine.monitors,
+            animationDuration: animate && config.animations ? config.animationDuration : 0
+        ) { [weak self] in
             self?.refreshBorder()
         }
     }
@@ -393,9 +522,26 @@ public final class WindowCoordinator {
         onStateChange?()
 
         let after = (engine.activeWorkspace?.id, engine.activeWorkspace?.layout)
-        if config.showHUD, before != after, let ws = engine.activeWorkspace,
-           let monitor = engine.monitors.first(where: { $0.id == engine.focusedMonitor }) {
+        guard config.showHUD, let ws = engine.activeWorkspace,
+              let monitor = engine.monitors.first(where: { $0.id == engine.focusedMonitor })
+        else { return }
+        if before != after {
             system.showHUD("\(ws.id)  ·  \(ws.layout.title)", on: monitor)
+            return
+        }
+        // Grouped windows are stacked, so there's otherwise nothing to show which one this is.
+        let focused = engine.focusedWindow
+        switch command {
+        case .toggleGroup, .removeFromGroup, .groupNext, .groupPrevious, .moveIntoGroup:
+            if let position = focused.flatMap({ engine.groupPosition(of: $0) }) {
+                system.showHUD("Group  ·  \(position.index) of \(position.count)", on: monitor)
+            } else {
+                system.showHUD("Not grouped", on: monitor)
+            }
+        case .toggleSticky:
+            system.showHUD(focused.map(engine.isSticky) == true ? "Sticky on" : "Sticky off", on: monitor)
+        default:
+            break
         }
     }
 
@@ -408,6 +554,17 @@ public final class WindowCoordinator {
         case .left: run("focus-left")
         case .right: run("focus-right")
         case nil: break
+        }
+    }
+
+    /// Fingers on the trackpad changed. A swipe slides along the row in the scrolling layout, and
+    /// changes workspace in the others.
+    public func trackpadTouches(_ touches: [CGPoint]) {
+        guard config.trackpadSwipes, let step = swipes.update(touches: touches) else { return }
+        let isScrolling = engine.activeWorkspace?.layout == .scrolling
+        switch step {
+        case .fingersLeft: run(isScrolling ? "focus-right" : "workspace-next")
+        case .fingersRight: run(isScrolling ? "focus-left" : "workspace-previous")
         }
     }
 
@@ -453,7 +610,7 @@ public final class WindowCoordinator {
         }
         guard draggedWindow == nil else { return }
         draggedWindow = id
-        system.showBorder(around: nil, width: 0)
+        system.showBorder(around: nil, width: 0, style: .normal)
         pollForMouseUp()
     }
 

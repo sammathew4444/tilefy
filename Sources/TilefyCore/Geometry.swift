@@ -9,7 +9,7 @@ public enum Direction: String, CaseIterable, Sendable {
     var axis: Axis { self == .left || self == .right ? .horizontal : .vertical }
 }
 
-public enum Axis: Sendable {
+public enum Axis: String, Codable, Sendable {
     /// Children sit side by side.
     case horizontal
     /// Children sit on top of each other.

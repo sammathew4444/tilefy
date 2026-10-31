@@ -64,6 +64,12 @@ enum AX {
         setSize(element, frame.size)
     }
 
+    /// One step of an animation: the same as `setFrame`, without the extra call only needed at the end.
+    static func setFrameForAnimation(_ element: AXUIElement, _ frame: CGRect) {
+        setSize(element, frame.size)
+        setPosition(element, frame.origin)
+    }
+
     static func isSettable(_ element: AXUIElement, _ name: String) -> Bool {
         var settable = DarwinBoolean(false)
         let status = AXUIElementIsAttributeSettable(element, name as CFString, &settable)
@@ -103,6 +109,7 @@ final class FrameWriter {
         var hides: [WindowID: (AXUIElement, MonitorID)] = [:]
         var focus: AXUIElement?
         var monitors: [Monitor] = []
+        var animationDuration: Double = 0
         var completions: [() -> Void] = []
         var isDraining = false
     }
@@ -110,6 +117,7 @@ final class FrameWriter {
     private let lock = NSLock()
     private var pending: [pid_t: Pending] = [:]
     private var queues: [pid_t: DispatchQueue] = [:]
+    private var tooSlowUntil: [pid_t: Date] = [:]
 
     func enqueue(
         pid: pid_t,
@@ -117,6 +125,7 @@ final class FrameWriter {
         hides: [(WindowID, AXUIElement, MonitorID)],
         focus: AXUIElement?,
         monitors: [Monitor],
+        animationDuration: Double,
         completion: (() -> Void)?
     ) {
         lock.lock()
@@ -133,6 +142,7 @@ final class FrameWriter {
         if let focus { entry.focus = focus }
         if let completion { entry.completions.append(completion) }
         entry.monitors = monitors
+        entry.animationDuration = animationDuration
 
         let shouldStart = !entry.isDraining
         entry.isDraining = true
@@ -184,10 +194,16 @@ final class FrameWriter {
         let wasEnhanced = AX.attribute(app, enhanced as String, as: Bool.self) ?? false
         if wasEnhanced { AXUIElementSetAttributeValue(app, enhanced, kCFBooleanFalse) }
 
+        var slides: [(element: AXUIElement, from: CGRect, to: CGRect)] = []
+        let canSlide = work.animationDuration > 0 && !isTooSlowToAnimate(pid)
         for (element, frame) in work.frames.values {
             let current = AX.frame(of: element)
             if let current, Self.isClose(current, frame) { continue }
-            AX.setFrame(element, frame)
+            if canSlide, let current, FrameAnimation.isWorthAnimating(from: current, to: frame, monitors: work.monitors) {
+                slides.append((element, current, frame))
+            } else {
+                AX.setFrame(element, frame)
+            }
         }
 
         for (element, monitorID) in work.hides.values {
@@ -200,17 +216,63 @@ final class FrameWriter {
             }
         }
 
-        if wasEnhanced { AXUIElementSetAttributeValue(app, enhanced, kCFBooleanTrue) }
-
+        // Before sliding, so that the keyboard answers straight away.
         if let focus = work.focus {
             AX.focus(window: focus, app: app)
         }
+
+        slide(slides, duration: work.animationDuration, pid: pid)
+
+        if wasEnhanced { AXUIElementSetAttributeValue(app, enhanced, kCFBooleanTrue) }
 
         retryRefusedFrames(work, pid: pid)
 
         if !work.completions.isEmpty {
             DispatchQueue.main.async { work.completions.forEach { $0() } }
         }
+    }
+
+    /// Moving a window through Accessibility is slow in some apps, as each step makes the app lay out
+    /// again. If this app can't keep up, it jumps straight to the end, and goes on doing so for a while.
+    private func slide(_ slides: [(element: AXUIElement, from: CGRect, to: CGRect)], duration: Double, pid: pid_t) {
+        guard !slides.isEmpty else { return }
+        let frameBudget: TimeInterval = 0.035
+        let frameTarget: TimeInterval = 1.0 / 60
+        let start = Date()
+        var slowFrames = 0
+
+        while true {
+            let frameStart = Date()
+            let progress = frameStart.timeIntervalSince(start) / duration
+            if progress >= 1 { break }
+            for slide in slides {
+                AX.setFrameForAnimation(slide.element, FrameAnimation.interpolate(from: slide.from, to: slide.to, progress: progress))
+            }
+            // Newer positions are waiting. Stop here, and the next pass carries on from wherever this is.
+            if hasPendingWork(pid) { return }
+
+            let spent = Date().timeIntervalSince(frameStart)
+            slowFrames = spent > frameBudget ? slowFrames + 1 : 0
+            if slowFrames >= 2 {
+                markTooSlowToAnimate(pid)
+                log.notice("Pid \(pid) is too slow to animate (\(Int(spent * 1000)) ms per frame). Moving instantly for now.")
+                break
+            }
+            if spent < frameTarget { usleep(useconds_t((frameTarget - spent) * 1_000_000)) }
+        }
+        for slide in slides { AX.setFrame(slide.element, slide.to) }
+    }
+
+    private func isTooSlowToAnimate(_ pid: pid_t) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return (tooSlowUntil[pid] ?? .distantPast) > Date()
+    }
+
+    private func markTooSlowToAnimate(_ pid: pid_t) {
+        lock.lock()
+        defer { lock.unlock() }
+        tooSlowUntil[pid] = Date().addingTimeInterval(60)
     }
 
     /// Some apps ignore a resize while they're busy, or apply only part of it. Check, and ask again a
