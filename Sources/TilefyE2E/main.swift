@@ -18,6 +18,12 @@ func runFixture(count: Int) -> Never {
     var windows: [NSWindow] = []
     let colors: [NSColor] = [.systemBlue, .systemPurple, .systemTeal, .systemOrange, .systemPink, .systemGreen, .systemIndigo]
 
+    // Written to a file on request, so the driver can see how many steps each move took.
+    var moveCount = 0
+    for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+        NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in moveCount += 1 }
+    }
+
     func open() {
         let window = NSWindow(
             contentRect: NSRect(x: 200 + windows.count * 30, y: 200 + windows.count * 30, width: 420, height: 300),
@@ -51,6 +57,8 @@ func runFixture(count: Int) -> Never {
             if let window { window.minSize = window.frame.size }
         case "allow-resizes":
             window?.minSize = NSSize(width: 100, height: 100)
+        case "report-moves":
+            try? String(moveCount).write(toFile: NSTemporaryDirectory() + "tilefy-e2e-moves", atomically: true, encoding: .utf8)
         case "quit": exit(0)
         default: break
         }
@@ -350,37 +358,44 @@ func writeConfig(_ json: String) {
     pump(0.5)
 }
 
-/// Every different frame the windows pass through in the next moment, read from the window server.
-func distinctFramesDuring(_ seconds: TimeInterval, after action: () -> Void) -> Int {
-    var seen: Set<String> = []
-    action()
-    let end = Date().addingTimeInterval(seconds)
-    while Date() < end {
-        for (id, frame) in frames() { seen.insert("\(id) \(frame)") }
-        usleep(4000)
+/// How many times the fixture's windows moved or resized, as counted by the fixture itself.
+func moveCount() -> Int {
+    let path = NSTemporaryDirectory() + "tilefy-e2e-moves"
+    try? FileManager.default.removeItem(atPath: path)
+    control("report-moves")
+    var count = 0
+    _ = waitUntil(timeout: 3) {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8), let value = Int(text) else { return false }
+        count = value
+        return true
     }
-    return seen.count
+    return count
 }
 
-// Slower than normal, to be sure of catching it from another process.
+/// How many steps a layout change takes.
+func movesDuring(_ command: String) -> Int {
+    dispatch("layout-master")
+    _ = waitUntil { isTiled(count: 3) }
+    pump(1.2)
+    let before = moveCount()
+    dispatch(command)
+    _ = waitUntil { isTiled(count: 3) }
+    pump(1.2)
+    return moveCount() - before
+}
+
+let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle", "animationDuration": 0.5}"#)
-dispatch("layout-master")
-_ = waitUntil { isTiled(count: 3) }
-pump(1)
-let animatedFrames = distinctFramesDuring(1) { dispatchWithoutWaiting("layout-dwindle") }
-let writerLog = capture("/usr/bin/log", [
-    "show", "--last", "1m", "--style", "compact", "--info",
-    "--predicate", "subsystem == \"app.tilefy\" AND category == \"writer\"",
-]).output.split(separator: "\n").suffix(6).joined(separator: "\n        ")
-print("  note  \(animatedFrames) distinct frames while animating. Tilefy's log:\n        \(writerLog)")
-check("windows pass through in-between positions", animatedFrames > 6, "only \(animatedFrames) distinct frames")
-check("and end up exactly tiled", waitUntil { isTiled(count: 3) }, describe())
+let animatedMoves = movesDuring("layout-dwindle")
 writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle", "animations": false}"#)
-dispatch("layout-master")
-_ = waitUntil { isTiled(count: 3) }
-pump(0.5)
-let instantFrames = distinctFramesDuring(1) { dispatchWithoutWaiting("layout-dwindle") }
-check("turning animations off makes moves instant", instantFrames < animatedFrames && instantFrames <= 9, "\(instantFrames) distinct frames, \(animatedFrames) when animated")
+let instantMoves = movesDuring("layout-dwindle")
+print("  note  a layout change took \(animatedMoves) window moves when animated, \(instantMoves) when instant. Reduce Motion: \(reduceMotion)")
+if reduceMotion {
+    print("  skip  Reduce Motion is on, so nothing should animate here")
+} else {
+    check("animated moves go through in-between positions", animatedMoves > instantMoves * 2, "\(animatedMoves) moves, against \(instantMoves) when instant")
+}
+check("and end up exactly tiled", isTiled(count: 3), describe())
 writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle"}"#)
 _ = waitUntil { isTiled(count: 3) }
 
