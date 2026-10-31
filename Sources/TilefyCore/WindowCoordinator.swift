@@ -1,5 +1,8 @@
 import CoreGraphics
 import Foundation
+import os
+
+private let log = Logger(subsystem: "app.tilefy", category: "coordinator")
 
 /// A snapshot of the current state, for `Tilefy status` and scripts.
 public struct TilefyStatus: Codable, Equatable {
@@ -50,7 +53,10 @@ public final class WindowCoordinator {
     private var lastSystemFocus: WindowID?
 
     private var draggedWindow: WindowID?
+    /// Windows that aren't where the layout wants them, and how often Tilefy has tried to fix that.
+    private var driftAttempts: [WindowID: (target: CGRect, count: Int)] = [:]
 
+    static let driftAttemptLimit = 3
     static let heartbeatInterval: TimeInterval = 1.5
     static let focusGuard: TimeInterval = 0.4
 
@@ -75,6 +81,7 @@ public final class WindowCoordinator {
         system.after(Self.heartbeatInterval) { [weak self] in
             guard let self, self.isStarted else { return }
             self.reconcile(full: true)
+            self.correctDrift()
             self.scheduleHeartbeat()
         }
     }
@@ -139,6 +146,11 @@ public final class WindowCoordinator {
         if full { system.attachToRunningApps() }
 
         let onScreen = system.onScreenWindows()
+        // With windows being tracked, an empty list usually isn't the truth: it can happen for a moment
+        // during Space transitions and at the lock screen. Closed windows are still noticed, because
+        // that's checked per window, but nothing gets marked as away on the strength of this.
+        let listIsSuspect = onScreen.isEmpty && !owners.isEmpty
+        if listIsSuspect { log.notice("The on-screen window list is empty. Ignoring it for suspensions.") }
         let focusedBefore = engine.focusedWindow
         var changed = false
         var focusedWindowClosed = false
@@ -154,6 +166,7 @@ public final class WindowCoordinator {
                 changed = true
                 continue
             }
+            if listIsSuspect { continue }
             if full, isOnScreen {
                 if system.isFullScreen(id) {
                     fullscreenWindows.insert(id)
@@ -165,8 +178,10 @@ public final class WindowCoordinator {
             if shouldShow == engine.isSuspended(id) {
                 if shouldShow {
                     engine.resumeWindow(id)
+                    log.notice("Window \(id) is back.")
                 } else {
                     engine.suspendWindow(id)
+                    log.notice("Window \(id) is away: on-screen \(isOnScreen), fullscreen \(self.fullscreenWindows.contains(id)).")
                 }
                 changed = true
             }
@@ -186,6 +201,38 @@ public final class WindowCoordinator {
             // Many apps adjust a new window's size just after showing it, so check it again.
             system.after(0.35) { [weak self] in self?.apply(focus: false) }
         }
+    }
+
+    /// Puts back windows that aren't where they should be: an app that resized itself, or refused a
+    /// resize while it was busy. Each target gets a few tries, so a window with a real size limit is
+    /// left alone rather than fought forever.
+    private func correctDrift() {
+        guard !isPaused, isStarted, draggedWindow == nil, !system.isMouseDown else { return }
+        var needsApply = false
+        for (id, target) in lastPlan.frames {
+            guard engine.workspace(containing: id)?.isFloating(id) == false,
+                  !engine.isSuspended(id),
+                  let actual = system.frame(of: id)
+            else { continue }
+            if isClose(actual, target) {
+                driftAttempts[id] = nil
+                continue
+            }
+            var attempt = driftAttempts[id] ?? (target, 0)
+            if attempt.target != target { attempt = (target, 0) }
+            if attempt.count < Self.driftAttemptLimit {
+                attempt.count += 1
+                needsApply = true
+                log.notice("Window \(id) drifted to \(String(describing: actual)), wanted \(String(describing: target)). Attempt \(attempt.count).")
+            }
+            driftAttempts[id] = attempt
+        }
+        driftAttempts = driftAttempts.filter { lastPlan.frames[$0.key] != nil }
+        if needsApply { apply(focus: false) }
+    }
+
+    private func isClose(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.minX - b.minX) <= 2 && abs(a.minY - b.minY) <= 2 && abs(a.width - b.width) <= 2 && abs(a.height - b.height) <= 2
     }
 
     private func discoverWindows(onScreen: [WindowID: Int32], isInitialScan: Bool) -> Bool {

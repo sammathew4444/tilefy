@@ -1,6 +1,9 @@
 import AppKit
 import ApplicationServices
+import os
 import TilefyCore
+
+private let log = Logger(subsystem: "app.tilefy", category: "writer")
 
 /// Private but long-stable, and used by essentially every Mac window manager: there is no public
 /// way to match an Accessibility window to its CGWindowID.
@@ -203,13 +206,43 @@ final class FrameWriter {
             AX.focus(window: focus, app: app)
         }
 
+        retryRefusedFrames(work, pid: pid)
+
         if !work.completions.isEmpty {
             DispatchQueue.main.async { work.completions.forEach { $0() } }
         }
     }
 
+    /// Some apps ignore a resize while they're busy, or apply only part of it. Check, and ask again a
+    /// couple of times soon after. The heartbeat keeps watching beyond that.
+    private func retryRefusedFrames(_ work: Pending, pid: pid_t) {
+        var refused = work.frames.values.filter { element, frame in
+            AX.frame(of: element).map { !Self.isClose($0, frame) } ?? false
+        }
+        for delay: useconds_t in [80_000, 250_000] where !refused.isEmpty {
+            usleep(delay)
+            if hasPendingWork(pid) { return }  // Newer positions are waiting, so these are out of date.
+            for (element, frame) in refused { AX.setFrame(element, frame) }
+            refused = refused.filter { element, frame in
+                AX.frame(of: element).map { !Self.isClose($0, frame) } ?? false
+            }
+        }
+        for (element, frame) in refused {
+            let actual = AX.frame(of: element).map { String(describing: $0) } ?? "unknown"
+            let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)"
+            log.notice("\(name, privacy: .public) kept a window at \(actual, privacy: .public), wanted \(String(describing: frame), privacy: .public).")
+        }
+    }
+
+    private func hasPendingWork(_ pid: pid_t) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = pending[pid] else { return false }
+        return !entry.frames.isEmpty || !entry.hides.isEmpty || entry.focus != nil
+    }
+
     private static func isClose(_ a: CGRect, _ b: CGRect) -> Bool {
-        abs(a.minX - b.minX) < 1 && abs(a.minY - b.minY) < 1 && abs(a.width - b.width) < 1 && abs(a.height - b.height) < 1
+        abs(a.minX - b.minX) < 1.5 && abs(a.minY - b.minY) < 1.5 && abs(a.width - b.width) < 1.5 && abs(a.height - b.height) < 1.5
     }
 }
 

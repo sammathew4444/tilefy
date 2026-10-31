@@ -27,8 +27,8 @@ jobs:
       - name: Grant Accessibility permission
         run: scripts/ci-grant-accessibility.sh "$(swift build -c release --show-bin-path)/TilefyE2E" "$PWD/build/Tilefy.app/Contents/MacOS/Tilefy"
       - name: Real-window tests
-        run: scripts/e2e.sh screenshots
-        timeout-minutes: 6
+        run: scripts/e2e.sh screenshots --second-display --login-item
+        timeout-minutes: 8
       - name: Keep the screenshots
         if: always()
         uses: actions/upload-artifact@v4
