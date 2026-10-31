@@ -225,7 +225,9 @@ final class AccessibilitySystem: WindowSystem {
         animationDuration: Double,
         completion: @escaping () -> Void
     ) {
-        let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : animationDuration
+        // The override is for the real-window tests, as GitHub's Mac runners have Reduce Motion on.
+        let ignoreReduceMotion = ProcessInfo.processInfo.environment["TILEFY_IGNORE_REDUCE_MOTION"] != nil
+        let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion && !ignoreReduceMotion ? 0 : animationDuration
         // The outline would lag behind a sliding window, so it comes back once the window has arrived.
         if duration > 0, let focused = plan.focused, let target = plan.frames[focused], target != lastBorderFrame {
             border.hide()

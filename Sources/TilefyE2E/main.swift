@@ -190,7 +190,7 @@ func launchTilefy() {
         // Through Launch Services, so macOS checks Tilefy's own Accessibility permission.
         capture("/usr/bin/open", [
             "-n", appArgument,
-            "--env", "TILEFY_CONFIG=\(configPath)", "--env", "TILEFY_STATE=\(statePath)",
+            "--env", "TILEFY_CONFIG=\(configPath)", "--env", "TILEFY_STATE=\(statePath)", "--env", "TILEFY_IGNORE_REDUCE_MOTION=1",
             "--args", "--only-app=TilefyE2E",
         ])
     } else {
@@ -199,7 +199,7 @@ func launchTilefy() {
         process.executableURL = URL(fileURLWithPath: tilefyBinary)
         process.arguments = ["--only-app=TilefyE2E"]
         process.environment = ProcessInfo.processInfo.environment.merging([
-            "TILEFY_CONFIG": configPath, "TILEFY_STATE": statePath,
+            "TILEFY_CONFIG": configPath, "TILEFY_STATE": statePath, "TILEFY_IGNORE_REDUCE_MOTION": "1",
         ]) { _, new in new }
         try? process.run()
     }
@@ -384,17 +384,12 @@ func movesDuring(_ command: String) -> Int {
     return moveCount() - before
 }
 
-let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle", "animationDuration": 0.5}"#)
 let animatedMoves = movesDuring("layout-dwindle")
 writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle", "animations": false}"#)
 let instantMoves = movesDuring("layout-dwindle")
-print("  note  a layout change took \(animatedMoves) window moves when animated, \(instantMoves) when instant. Reduce Motion: \(reduceMotion)")
-if reduceMotion {
-    print("  skip  Reduce Motion is on, so nothing should animate here")
-} else {
-    check("animated moves go through in-between positions", animatedMoves > instantMoves * 2, "\(animatedMoves) moves, against \(instantMoves) when instant")
-}
+print("  note  a layout change took \(animatedMoves) window moves when animated, \(instantMoves) when instant")
+check("animated moves go through in-between positions", animatedMoves > instantMoves * 2, "\(animatedMoves) moves, against \(instantMoves) when instant")
 check("and end up exactly tiled", isTiled(count: 3), describe())
 writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle"}"#)
 _ = waitUntil { isTiled(count: 3) }
@@ -785,24 +780,29 @@ if testLoginItem {
     dispatch("open-settings-general")
     pump(1.2)
 
-    var seenControls: [String] = []
-    func findCheckbox(_ element: AXUIElement, depth: Int = 0) -> AXUIElement? {
+    // In a grouped form the switch has no name of its own, and comes right after its label.
+    var controls: [(role: String, name: String, element: AXUIElement)] = []
+    func collect(_ element: AXUIElement, depth: Int = 0) {
         var role: CFTypeRef?
         var title: CFTypeRef?
         var label: CFTypeRef?
+        var value: CFTypeRef?
         AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
         AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &title)
         AXUIElementCopyAttributeValue(element, kAXDescriptionAttribute as CFString, &label)
-        let name = "\(title as? String ?? "") \(label as? String ?? "")"
-        if seenControls.count < 40 { seenControls.append("\(role as? String ?? "?"): \(name)") }
-        if role as? String == kAXCheckBoxRole, name.contains("login") { return element }
+        AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value)
+        let name = [title as? String, label as? String, value as? String].compactMap { $0 }.joined(separator: " ")
+        controls.append((role as? String ?? "?", name, element))
         var children: CFTypeRef?
         AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children)
-        guard depth < 24, let list = children as? [AXUIElement] else { return nil }
-        for child in list {
-            if let found = findCheckbox(child, depth: depth + 1) { return found }
-        }
-        return nil
+        guard depth < 24, let list = children as? [AXUIElement] else { return }
+        for child in list { collect(child, depth: depth + 1) }
+    }
+
+    func findCheckbox(_ app: AXUIElement) -> AXUIElement? {
+        collect(app)
+        guard let labelIndex = controls.firstIndex(where: { $0.name.contains("Launch at login") }) else { return nil }
+        return controls[labelIndex...].first { $0.role == kAXCheckBoxRole }?.element
     }
 
     if let pid = capture("/usr/bin/pgrep", ["-x", "Tilefy"]).output.split(separator: "\n").first.flatMap({ Int32($0) }),
@@ -817,7 +817,7 @@ if testLoginItem {
         screenshot("login-item-off")
         check("turning it off removes it", waitUntil { !loginItemRegistered() })
     } else {
-        check("found the Launch at login checkbox", false, "\(seenControls)")
+        check("found the Launch at login checkbox", false, "\(controls.prefix(30).map { "\($0.role): \($0.name)" })")
     }
 }
 
