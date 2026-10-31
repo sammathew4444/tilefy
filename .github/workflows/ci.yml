@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: swift test
+      - name: Build the app
+        run: scripts/build-app.sh
+
+  # Real windows on a throwaway Mac. Accessibility permission can be granted here without a person,
+  # because hosted runners have System Integrity Protection turned off.
+  e2e:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the app
+        run: scripts/build-app.sh
+      - name: Build the test runner
+        run: swift build -c release --product TilefyE2E
+      - name: Grant Accessibility permission
+        run: scripts/ci-grant-accessibility.sh "$(swift build -c release --show-bin-path)/TilefyE2E" "$PWD/build/Tilefy.app/Contents/MacOS/Tilefy"
+      - name: Real-window tests
+        run: scripts/e2e.sh screenshots
+        timeout-minutes: 6
+      - name: Keep the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: screenshots
+          if-no-files-found: warn
