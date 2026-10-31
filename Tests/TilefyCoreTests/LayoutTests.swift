@@ -413,6 +413,17 @@ final class WorkspaceTests: XCTestCase {
         }
     }
 
+    func testWorkspaceRegainsFocusWhenWindowsReturn() {
+        let engine = makeEngine(windows: 2)
+        engine.suspendWindow(1)
+        engine.suspendWindow(2)
+        XCTAssertNil(engine.focusedWindow)
+        engine.resumeWindow(1)
+        XCTAssertEqual(engine.focusedWindow, 1)
+        engine.resumeWindow(2)
+        XCTAssertEqual(engine.focusedWindow, 1, "doesn't jump to each returning window")
+    }
+
     func testSuspendingFocusedWindowMovesFocus() {
         let engine = makeEngine(windows: 3)
         engine.suspendWindow(3)

@@ -259,6 +259,17 @@ public final class WindowCoordinator {
             return false
         }
         guard id != lastSystemFocus else {
+            // Same window as before, so it isn't news. But if its workspace is showing and has lost
+            // track of it (the window list can come back briefly empty during Space transitions, and
+            // that clears focus), put it right. Otherwise shortcuts have nothing to act on.
+            if let ws = engine.workspace(containing: id), engine.isVisible(ws), ws.focused != id {
+                engine.focusChanged(to: id)
+                if applyChanges {
+                    apply(focus: false)
+                    onStateChange?()
+                }
+                return true
+            }
             if applyChanges { refreshBorder() }
             return false
         }
