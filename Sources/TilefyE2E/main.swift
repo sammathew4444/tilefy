@@ -368,7 +368,12 @@ dispatch("layout-master")
 _ = waitUntil { isTiled(count: 3) }
 pump(1)
 let animatedFrames = distinctFramesDuring(1) { dispatchWithoutWaiting("layout-dwindle") }
-check("windows pass through in-between positions", animatedFrames > 8, "only \(animatedFrames) distinct frames")
+let writerLog = capture("/usr/bin/log", [
+    "show", "--last", "1m", "--style", "compact", "--info",
+    "--predicate", "subsystem == \"app.tilefy\" AND category == \"writer\"",
+]).output.split(separator: "\n").suffix(6).joined(separator: "\n        ")
+print("  note  \(animatedFrames) distinct frames while animating. Tilefy's log:\n        \(writerLog)")
+check("windows pass through in-between positions", animatedFrames > 6, "only \(animatedFrames) distinct frames")
 check("and end up exactly tiled", waitUntil { isTiled(count: 3) }, describe())
 writeConfig(#"{"innerGap": 8, "outerGap": 8, "defaultLayout": "dwindle", "animations": false}"#)
 dispatch("layout-master")

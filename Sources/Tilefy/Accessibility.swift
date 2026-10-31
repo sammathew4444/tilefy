@@ -240,8 +240,10 @@ final class FrameWriter {
         let frameTarget: TimeInterval = 1.0 / 60
         let start = Date()
         var slowFrames = 0
+        var frames = 0
 
         while true {
+            frames += 1
             let frameStart = Date()
             let progress = frameStart.timeIntervalSince(start) / duration
             if progress >= 1 { break }
@@ -261,6 +263,7 @@ final class FrameWriter {
             if spent < frameTarget { usleep(useconds_t((frameTarget - spent) * 1_000_000)) }
         }
         for slide in slides { AX.setFrame(slide.element, slide.to) }
+        log.info("Animated \(slides.count) windows for pid \(pid): \(frames) frames in \(Int(Date().timeIntervalSince(start) * 1000)) ms.")
     }
 
     private func isTooSlowToAnimate(_ pid: pid_t) -> Bool {
