@@ -120,6 +120,8 @@ public final class Workspace {
 
     func resume(_ id: WindowID) {
         suspended.remove(id)
+        // Everything was away, so nothing has focus. A workspace with windows shouldn't stay that way.
+        if focused == nil, order.contains(id) { setFocused(id) }
     }
 
     private func focusNeighbour(ofRemovedIndex index: Int?) {

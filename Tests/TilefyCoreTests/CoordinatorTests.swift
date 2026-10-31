@@ -279,6 +279,39 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.engine.focusedWindow, 1)
     }
 
+    func testFocusSurvivesTheWindowListComingBackEmpty() {
+        // Seen on a real Mac: Tilefy lost focus for good, so shortcuts did nothing until a click.
+        start(windows: 2)
+        XCTAssertEqual(coordinator.engine.focusedWindow, 2)
+        for id: WindowID in [1, 2] { mac.windows[id]!.onScreen = false }
+        coordinator.scheduleReconcile(full: true)
+        mac.advance(0.1)
+        XCTAssertNil(coordinator.engine.focusedWindow)
+
+        for id: WindowID in [1, 2] { mac.windows[id]!.onScreen = true }
+        coordinator.scheduleReconcile(full: true)
+        mac.advance(0.1)
+        XCTAssertEqual(coordinator.engine.focusedWindow, 2, "the window macOS says is focused, not just any")
+        coordinator.run("focus-left")
+        XCTAssertEqual(coordinator.engine.focusedWindow, 1, "shortcuts work again")
+    }
+
+    func testFocusOnAnEmptyDisplayIsntPulledBack() {
+        mac = SimulatedMac()
+        mac.monitors.append(Monitor(
+            id: 2,
+            frame: CGRect(x: 1600, y: 0, width: 1000, height: 800),
+            visibleFrame: CGRect(x: 1600, y: 0, width: 1000, height: 800)
+        ))
+        mac.open(1)
+        coordinator = WindowCoordinator(config: Config(), system: mac)
+        coordinator.start()
+        coordinator.run("focus-monitor-next")
+        XCTAssertEqual(coordinator.engine.focusedMonitor, 2)
+        for _ in 0..<3 { heartbeat() }
+        XCTAssertEqual(coordinator.engine.focusedMonitor, 2)
+    }
+
     func testCmdTabToAHiddenWorkspaceSwitchesToIt() {
         start(windows: 1)
         coordinator.run("workspace-2")
